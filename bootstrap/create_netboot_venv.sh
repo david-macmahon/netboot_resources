@@ -47,7 +47,7 @@ done
 
 # Activate virtual env and install ansible
 source activate
-python3 -m pip install ansible
+python3 -m pip install --ignore-installed ansible
 
 # Create ansible.cfg if it doesdn't exist
 if [ ! -e ansible.cfg ]
