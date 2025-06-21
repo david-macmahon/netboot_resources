@@ -6,7 +6,7 @@ filesystem.  The main functionality is provided by the script
 
 ## netbootstrap.sh
 
-Make a netbooot-able Ubuntu root file system directory.
+Make a netboot-able Ubuntu root file system directory.
 
 ### Usage
 
@@ -122,7 +122,7 @@ Read on for details of what the script does.
 
 6. Setup `initramfs-tools` in rootfs and run `update-initramfs`.
 
-   The initramfs filesystem performs early initializtion of a booting system.
+   The initramfs filesystem performs early initialization of a booting system.
    The `initramfs-tools` package provides a convenient way to add various
    customizations to this process.  In addition to a netboot specific
    [`initramfs.conf`](../netboot_root_files/etc/initramfs-tools/initramfs.conf)
@@ -195,13 +195,14 @@ A few essential steps are remain to be done at this point:
   users/groups from the head node's `/etc` files to the netboot's `/etc` files.
   Note that the UIDs and GIDs of system users and groups may differ between head
   node and netboot nodes, so copying those is strongly discouraged.  If you go
-  this way, don't forget to copy the correspinding entries is `/etc/shadow` and
+  this way, don't forget to copy the corresponding entries is `/etc/shadow` and
   `/etc/gshadow`.
 
 - Install additional drivers on the netboot nodes (e.g. GPU drivers, NIC
   drivers, etc.)
+
 - Configure additional network interfaces on the netboot nodes.
 
   These are getting somewhat outside the scope of establishing a viable netboot
-  system, but reseources for some additional sysadmin tasks like these will also
+  system, but resources for some additional sysadmin tasks like these will also
   be made available here.
