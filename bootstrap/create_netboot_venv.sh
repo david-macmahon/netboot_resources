@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# For now we bootstrap the ansible virtual env using the system python3.
+# For now we bootstrap the ansible virtual env using the system python3
+# which can be overridden by setting the PYTHON3 environment variable to the
+# path of the desired python3 executable before calling this script.
 
 # Keep ansible virtual env separate from any existing conda virtual env.
 for i in $(seq ${CONDA_SHLVL:-0})
@@ -21,7 +23,7 @@ if [ ! -e venv/netboot_admin ]
 then
     # Create virtual environment in venv subdir.
     # Use sub-shell to avoid having to cd back.
-    (cd venv && python3 -m venv netboot_admin)
+    (cd venv && ${PYTHON3:-python3} -m venv netboot_admin)
 fi
 
 if [ ! -e activate ]
