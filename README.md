@@ -182,14 +182,28 @@ A few essential steps are remain to be done at this point:
 
 - Create per-host subdirectories in persistentfs.
 
-  This will be handled by an ansible playbook, but for now you must manually
-  create these subdirectories.
+  This can be accomplished by running the ansible playbook
+  `playbooks/persistent-dirs.yml`.  That playbook requires that the
+  `persistent_root` ansible variable is set to the directory specified as
+  `PERSISTENT_ROOT` in the `netbootstrap.sh` script, e.g.
+  `/srv/noble/persistent`.  This ansible can be defined in the inventory file
+  or on the `ansible-playbook` command line.  For example:
+
+      ansible-playbook -e persistent_root=/srv/noble/persistent playbooks/persistent-dirs.yml
 
 - Setup users in the netboot root
 
   The recommended approach is to run LDAP on the head node and configure the
   netboot systems to authenticate users against the LDAP database on the head
-  node.  Ansible playbooks will be developed for this.
+  node.  The ansible playbook `playbooks/ldap-auth.yml` can be used to install
+  the requisite packages and setup a basic `/etc/ldap.conf` file.  It requires
+  that the ansible variable `netboot_domain` be set to the domain used in the
+  LDAP server.  Typically this is `<oranization_name>.pvt`.  If the LDAP server
+  to be used is not the first host in the ansible inventory's `head_nodes`
+  group, then the `ldap_server` variable can be used to specify the desired
+  LDAP server.
+
+      ansible-playbook -e netboot_domain=bl.pvt playbooks/ldap-auth.yml
 
   If you wish to avoid LDAP, you may want to simply copy the non-system
   users/groups from the head node's `/etc` files to the netboot's `/etc` files.
@@ -197,6 +211,10 @@ A few essential steps are remain to be done at this point:
   node and netboot nodes, so copying those is strongly discouraged.  If you go
   this way, don't forget to copy the corresponding entries is `/etc/shadow` and
   `/etc/gshadow`.
+
+- Setup rsyslog to send log messages to the head node
+
+    ansible-playbook netboot_resources/playbooks/rsyslog.yml
 
 - Install additional drivers on the netboot nodes (e.g. GPU drivers, NIC
   drivers, etc.)
@@ -206,3 +224,30 @@ A few essential steps are remain to be done at this point:
   These are getting somewhat outside the scope of establishing a viable netboot
   system, but resources for some additional sysadmin tasks like these will also
   be made available here.
+
+## Ansible playbooks
+
+Ansible playbooks included in the `playbooks` subdirectory of this repository
+are listed here with a brief description of what they do.
+
+- `autofs.yml` - Setup the automounter for netboot nodes
+- `dev-tools.yml` - Install useful development tools
+- `ether-hosts.yml` - Manage /etc/ethers and /etc/hosts on headnode [!]
+- `glusterfs.yml` - Install glusterd and config automounts on netboot nodes
+- `julia.yml` - Installs Julia for the netboot nodes
+- `ldap-auth.yml` - Configures netboot nodes to authenticate via LDAP
+- `lldpd.yml` - Obsolete.
+- `mlx_ofed.yml` - Deprecated past Ubuntu 22.
+- `nfs-kernel-server.yml` - Installs nfs-kernel-server for netboot nodes
+- `nvidia-cuda.yml` - Installs CUDA toolkit for netboot nodes
+- `nvidia-drivers.yml` - Installedgg CUDA kernel dirvers for netboot nodes
+- `persistent-dirs.yml` - Creates rsistent dirs on head node for netboot nodes
+- `persistent-exports.yml` - Setup NFS exports for hosts with `exports` defined
+- `persistent-local-mounts.yml` - Setup netboot local mounts (e.g. `/datax`)
+- `persistent-net-udev.yml` - Setup udev rules based on `net_iface` settings
+- `persistent-netplan.yml` - Setup netplan based on `net_iface` settings
+- `persistent-systemd.yml` - Setup systemd netboot-persistent.target etc
+- `prometheus-node-exporter.yml` - Install node exporter for netboot nodes
+- `python.yml` - Install `python-is-python3` package for netboot nodes
+- `rsyslog.yml` - Setup netboot rsyslog to log to head node
+- `timesync.yml` - Setup netboot time zone install `systemd-timesyncd`
