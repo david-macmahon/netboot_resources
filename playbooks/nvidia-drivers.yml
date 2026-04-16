@@ -4,9 +4,16 @@
   gather_facts: false
   become: true
   vars:
+    # Install proprietary kernel modules by default.  To install open kernel
+    # modules, add `-e kernel_module_type="open"` to the ansible-playbook
+    # command line.
+    kernel_module_type: "proprietary"
+
     nvidia_dist: /opt/nvidia/downloads
-    nvidia_version: "550.78"
-    nvidia_md5: c289987ebda8e9419a73e7e8e3409244
+    nvidia_version: "580.142"
+    nvidia_md5: 30a8bebe011ab3d9ff5d42a1279d4f61
+    #nvidia_version: "550.78"
+    #nvidia_md5: c289987ebda8e9419a73e7e8e3409244
   tasks:
     - name: get target of /boot/vmlinuz symlink
       command:
@@ -51,6 +58,7 @@
           - --dkms
           - --no-drm
           - --no-opengl-files
+          - "--kernel-module-type={{ kernel_module_type }}"
           - "--kernel-name={{ real_vmlinuz_path.stdout|replace('/boot/vmlinuz-','') }}"
 
     - name: update initramfs image
