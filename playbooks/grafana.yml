@@ -1,0 +1,33 @@
+# Install grafana on head node.
+---
+- hosts: head_nodes
+  gather_facts: false
+  become: true
+  vars:
+    download_dir: /opt/download
+    grafana_url: "https://dl.grafana.com/grafana/release/12.3.2/grafana_12.3.2_21390657659_linux_amd64.deb"
+    grafana_deb: "{{ download_dir }}/{{ grafana_url|basename }}"
+  tasks:
+    - name: ensure download_dir is an absolute path
+      fail:
+        msg: "download_dir ({{ download_dir }}) is not an absolute path"
+      when: download_dir[0] != '/'
+
+    - name: make directory for download
+      file:
+        path: "{{ download_dir }}/download"
+        owner: root
+        group: root
+        mode: '0755'
+        state: directory
+
+    - name: download grafana
+      get_url:
+        url: "{{ grafana_url }}"
+        dest: "{{ grafana_deb }}"
+
+    # TODO Ensure pre-requisites are installed
+
+    - name: install grafana
+      apt:
+        deb: "{{ grafana_deb }}"
