@@ -64,3 +64,18 @@
     - name: update initramfs image
       command:
         cmd: "update-initramfs -u"
+
+    - name: copy nvidia-persistenced.service systemd unit file
+      copy:
+        src: files/netboot/etc/systemd/system/nvidia-persistenced.service
+        dest: /etc/systemd/system/nvidia-persistenced.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: enable nvidia-persistenced service (without starting)
+      #ansible.builtin.systemd_service:
+      systemd_service:
+        name: nvidia-persistenced
+        state: stopped
+        enabled: true
