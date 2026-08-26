@@ -10,10 +10,10 @@
     kernel_module_type: "proprietary"
 
     nvidia_dist: /opt/nvidia/downloads
-    nvidia_version: "595.58.03"
-    nvidia_md5: 8d98a183bf994af0ff19980e0ef430f2
-    #nvidia_version: "580.142"
-    #nvidia_md5: 30a8bebe011ab3d9ff5d42a1279d4f61
+    nvidia_version: "595.91.07"
+    nvidia_md5: "d4e0f3e042a47fb1683d59b73fefa954"
+    #nvidia_version: "595.58.03"
+    #nvidia_md5: 8d98a183bf994af0ff19980e0ef430f2
   tasks:
     - name: get target of /boot/vmlinuz symlink
       command:
