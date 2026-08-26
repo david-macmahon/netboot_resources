@@ -48,3 +48,8 @@
           - libgsl-dev
           # Network testing
           - iperf
+          # dev files for builing apps (e.g. presto)
+          - libglib2.0-dev
+          - libx11-dev
+          - libpng-dev
+          - libpgplot0
