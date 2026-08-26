@@ -5,8 +5,8 @@
   become: true
   vars:
     # Latest version
-    julia_version: '1.11.2'
-    julia_checksum: 'sha256:8a372ad262d4d4d55a1044f4fe3bce7c9a4a3ce8c513d2470e58e8071eecd476'
+    julia_version: '1.12.6'
+    julia_checksum: 'sha256:bbabf3bef19421a9dbd24a767d807606ab85e444323b5a1c73ffe293fa3d079a'
     ## Latest LTS version
     #julia_version: '1.10.7'
     #julia_checksum: 'sha256:21b2c69806aacf191d7c81806c7d9918bddab30c7b5b8d4251389c3abe274334'
