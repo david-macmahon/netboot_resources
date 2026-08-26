@@ -45,5 +45,5 @@
         path: "/usr/local/bin/{{ item }}"
         force: "{{ ansible_check_mode }}"
       loop:
-        - "julia"
-        - "julia{{ julia_version.split('.')[0:2]|join() }}"
+        #- "julia"
+        - "julia{{ julia_version.split('.')[0:3]|join() }}"
