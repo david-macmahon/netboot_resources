@@ -89,8 +89,9 @@ provably matches the current registry sources.
                     (default: ./bl_netboot, relative to the invoking
                     directory; override with NIX_NETBOOT_CLUSTER_REPO)
 
-result states: missing/stale -> rerun with --build; dangling/foreign ->
-refused (fix by hand: rm the symlink if intentional). apply requires root.
+result states: missing/stale/older-generation -> rerun with --build;
+dangling/foreign -> refused (fix by hand: rm the symlink if intentional).
+apply requires root.
 EOF
   exit 2
 }
@@ -210,11 +211,32 @@ resolve_artifacts() {
 If intentional: rm $RESULT, then rerun."
     fi
     ART=$(readlink -f "$RESULT")
+    missing=""
     for f in etc-hosts.managed ethers.managed exports.managed dnsmasq-registry.conf \
              dnsmasq-registry.dhcp-hosts persistent-dirs; do
-      [ -r "$ART/$f" ] || die "result points at '$target', which is not a registry-artifacts tree (missing $f). Refusing even with --build.
-If intentional: rm $RESULT, then rerun."
+      [ -r "$ART/$f" ] || missing="$missing $f"
     done
+    if [ -n "$missing" ]; then
+      # A tree from an OLDER GENERATION of our own artifact family (built
+      # before a new artifact type was added) is stale, not foreign: the
+      # store-path name marks the family. Handle it exactly like staleness
+      # -- rebuildable with --build. Only trees that don't look like the
+      # family at all are foreign, i.e. hand-fixable mispointings.
+      case "$(basename "$ART")" in
+        *-registry-artifacts)
+          if [ "$DO_BUILD" = 1 ]; then
+            ART=$(do_build)
+          else
+            die "result is from an OLDER GENERATION of the artifact family (missing:$missing).
+Rerun with --build."
+          fi
+          ;;
+        *)
+          die "result points at '$target', which is not a registry-artifacts tree (missing:$missing). Refusing even with --build.
+If intentional: rm $RESULT, then rerun."
+          ;;
+      esac
+    fi
     # Freshness: Nix can predict the current build's store path without
     # building. Instantiation is pure evaluation (cheap). Both halves of
     # the check run under as_nix: the projection query too, since
