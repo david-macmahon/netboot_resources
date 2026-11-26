@@ -5,7 +5,6 @@
 # artifacts:
 #
 #   etc-hosts.managed   managed block for /etc/hosts (marker-delimited)
-#   ethers.managed      managed block for /etc/ethers (marker-delimited)
 #   exports.managed     managed block for /etc/exports (marker-delimited)
 #   persistent-dirs     manifest of persistent-storage anchors to materialize
 #   pxelinux.cfg/<hexip>  one file per node with a non-null `pxe` profile
@@ -187,32 +186,6 @@ let
     # END netboot-registry managed entries
   '';
 
-  # ---- /etc/ethers block ----------------------------------------------------
-  # dnsmasq on the head node runs with `read-ethers`, so these entries are
-  # both the ARP source AND the DHCP static reservations (including the
-  # static-only IPMI range).
-
-  ethersNode = name:
-    let
-      n = checkedNodes.${name};
-      ipmiLines = lib.optionals (n.ipmi or null != null) [
-        "${pad 20 (normMac n.ipmi.mac)}${trim n.ipmi.ip}"
-      ];
-    in
-    lib.concatStringsSep "\n" ([ "# ${name}" ] ++ [
-      "${pad 20 (normMac n.mac)}${trim n.ip}"
-    ] ++ ipmiLines);
-
-  ethersManaged = ''
-    # BEGIN netboot-registry managed entries -- GENERATED FILE, DO NOT EDIT.
-    # TRANSITIONAL: rendered only for the cutover. Registry DHCP
-    # reservations have moved to the dnsmasq dhcp-hostsfile; the apply
-    # script uses this block to REMOVE the registry's entries from
-    # /etc/ethers (other, non-registry entries and read-ethers stay).
-    ${lib.concatStringsSep "\n\n" (map ethersNode nodeNames)}
-    # END netboot-registry managed entries
-  '';
-
   # ---- /etc/exports block ---------------------------------------------------
   # Whole-tree export of the persistent root: ONE line per client spec,
   # independent of fleet size. Per-node exports would scale /etc/exports
@@ -344,7 +317,7 @@ let
       { name = "dnsmasq-registry.conf"; path = pkgs.writeText "dnsmasq-registry.conf" dnsmasqConfFile; }
       { name = "dnsmasq-registry.dhcp-hosts"; path = pkgs.writeText "dnsmasq-registry.dhcp-hosts" dnsmasqDhcpHostsFile; }
       { name = "exports.managed"; path = pkgs.writeText "exports.managed" exportsManaged; }
-      { name = "ethers.managed"; path = pkgs.writeText "ethers.managed" ethersManaged; }
+
       { name = "persistent-dirs"; path = pkgs.writeText "persistent-dirs" persistentManifest; }
     ]
     ++ pxeFiles

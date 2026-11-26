@@ -212,7 +212,7 @@ If intentional: rm $RESULT, then rerun."
     fi
     ART=$(readlink -f "$RESULT")
     missing=""
-    for f in etc-hosts.managed ethers.managed exports.managed dnsmasq-registry.conf \
+    for f in etc-hosts.managed exports.managed dnsmasq-registry.conf \
              dnsmasq-registry.dhcp-hosts persistent-dirs; do
       [ -r "$ART/$f" ] || missing="$missing $f"
     done
