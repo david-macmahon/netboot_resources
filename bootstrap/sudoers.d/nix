@@ -1,0 +1,28 @@
+# /etc/sudoers.d/nix
+#
+# Grant members of the "nixadm" group passwordless access to administer Nix
+# as the dedicated "nix" account (owner of the single-user install in /nix).
+#
+# This permits:
+#     sudo -iu nix              # interactive login shell as nix
+#     sudo -iu nix <command>    # one-off commands, e.g. nix-build
+#     sudo -u  nix <command>    # non-login variant
+#
+# IMPORTANT: this grants the nix account's privileges ONLY, never root.
+#
+# Prerequisites:
+#     sudo groupadd nixadm
+#     sudo usermod -aG nixadm <admin>
+#     (the "nix" account must have a real login shell for `sudo -iu nix`)
+#
+# Install (automated, recommended):
+#     sudo bootstrap/nix_setup.sh [USERNAME ...]
+# which creates the "nix" account and /nix, creates the "nixadm" group,
+# installs this file (validated with visudo) with mode 0440, and adds
+# the optional USERNAMEs to the group.
+#
+# Install (manual):
+#     sudo install -o root -g root -m 0440 bootstrap/sudoers.d/nix /etc/sudoers.d/nix
+#     sudo visudo -cf /etc/sudoers.d/nix
+
+%nixadm    ALL    =(nix)    NOPASSWD:    ALL
