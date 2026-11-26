@@ -534,8 +534,11 @@ if [ "${EXPORTS_CHANGED:-0}" = 1 ]; then
     exit 1
   fi
   echo "exports: exportfs -ra applied"
-  exportfs -s | grep -qF "$PROOT" \
-    || warn "persistent root not visible in 'exportfs -s' output: $PROOT"
+  # Verify the export is actually being SERVED (not just in the kernel
+  # table): showmount queries mountd. (exportfs -s would also work on
+  # modern nfs-utils but does not exist on Ubuntu 16.04's version.)
+  showmount -e localhost 2>/dev/null | grep -qF "$PROOT" \
+    || warn "persistent root not visible via 'showmount -e localhost': $PROOT"
 fi
 
 if [ "${RESTART:-0}" = 1 ]; then
