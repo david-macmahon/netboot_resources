@@ -7,7 +7,10 @@
 #   etc-hosts.managed   managed block for /etc/hosts (marker-delimited)
 #   exports.managed     managed block for /etc/exports (marker-delimited)
 #   persistent-dirs     manifest of persistent-storage anchors to materialize
-#   pxelinux.cfg/<hexip>  one file per node with a non-null `pxe` profile
+#   nixos-paths         TFTP/HTTP tree locations for the PXE artifacts
+#   pxelinux.cfg/<hexip>       per-node menu, for nodes with a `pxe` profile
+#   nixos-netboot/<name>.ipxe  per-node iPXE chain script (HTTP tree)
+#   ipxe.lkrn                  pxelinux->iPXE chainloader (nixpkgs ipxe)
 #
 # Cluster value shape (site data lives in the private cluster repo):
 #
@@ -285,11 +288,40 @@ let
   '';
 
   # ---- per-node PXE files ----------------------------------------------------
-  # pxelinux.cfg/<hexip> files, one per node with a non-null `pxe` profile.
-  # Profiles are defined here in the machinery; site data only references
-  # them by name. An unknown profile is a build error.
+  # Two artifact families per node with a non-null `pxe` profile:
+  #   pxelinux.cfg/<hexip>       (TFTP tree) house-style menu whose nixos
+  #                              label boots ipxe.lkrn and chains the
+  #                              node's iPXE script over HTTP
+  #   nixos-netboot/<name>.ipxe  (HTTP tree) sets the per-node cmdline
+  #                              (console + hostname= identity trigger)
+  #                              and chains the image's netboot.ipxe
+  #                              (relative -> same HTTP directory)
+  # Profiles are defined here in the machinery; site data references them
+  # by name and supplies the site facts (nixos.* in the cluster data).
+  # An unknown profile is a build error.
+  #
+  # Whole-file artifacts carry a "netboot-registry-managed" marker line:
+  # apply.sh uses it to distinguish registry-generated files from
+  # hand-era files in the shared TFTP/HTTP trees (withdrawal = deletion).
 
-  pxeProfiles = { }; # extended as boot profiles are integrated (e.g. nixos)
+  pxeMarker = "netboot-registry-managed";
+
+  pxeProfiles = {
+    nixos = { name }: ''
+      UI menu.c32
+      MENU TITLE ${cluster.nixos.menuTitle}
+      TIMEOUT 50
+      TOTALTIMEOUT 3000
+      DEFAULT nixos
+      INCLUDE ${cluster.nixos.rescueInclude}
+      MENU SEPARATOR
+      LABEL nixos
+          MENU LABEL NixOS (netboot)
+          KERNEL ipxe.lkrn
+          APPEND chain ${cluster.nixos.httpBaseUrl}/${name}.ipxe
+    '';
+    # extended as further boot profiles are integrated
+  };
 
   pxeNodeNames = lib.filter (name: checkedNodes.${name}.pxe or null != null)
     nodeNames;
@@ -306,8 +338,39 @@ let
 
   pxeFiles = map (name:
     { name = "pxelinux.cfg/${hexip checkedNodes.${name}.ip}";
-      path = pxeProfiles.${checkedNodes.${name}.pxe};
+      path = pkgs.writeText "pxelinux.cfg-${hexip checkedNodes.${name}.ip}"
+        ("# ${pxeMarker} pxelinux config -- GENERATED CONTENT, DO NOT EDIT.\n" +
+         pxeProfiles.${checkedNodes.${name}.pxe} { inherit name; });
     }) pxeNodeNames;
+
+  # Per-node iPXE scripts. The marker comment is AFTER the #!ipxe magic
+  # line: iPXE detects scripts by the magic bytes at the START of the file.
+  # `chain netboot.ipxe` is relative and resolves against this script's own
+  # URL, so the image payloads must be served from the same HTTP directory.
+  pxeIpxeFiles = map (name:
+    { name = "nixos-netboot/${name}.ipxe";
+      path = pkgs.writeText "nixos-netboot-${name}.ipxe" ''
+        #!ipxe
+        # ${pxeMarker} iPXE script -- GENERATED CONTENT, DO NOT EDIT.
+        # Regenerate from the node registry (nodes/*.nix in the cluster
+        # repo) and redeploy with the registry apply script.
+        set cmdline ${cluster.nixos.console} hostname=${name}
+        chain netboot.ipxe
+      '';
+    }) pxeNodeNames;
+
+  # ipxe.lkrn: the BIOS pxelinux->iPXE chainloader, from nixpkgs. Only
+  # present when at least one node uses a pxe profile.
+  ipxeLkrnFiles = lib.optionals (pxeNodeNames != [ ]) [
+    { name = "ipxe.lkrn"; path = "${pkgs.ipxe}/ipxe.lkrn"; }
+  ];
+
+  # Head-node layout facts the apply script needs (where the TFTP/HTTP
+  # trees live). Parsed from the header lines, persistent-dirs style.
+  nixosPaths = ''
+    # tftp-dir: ${cluster.nixos.tftpDir}
+    # http-dir: ${cluster.nixos.httpDir}
+  '';
 
   # ---- artifacts ---------------------------------------------------------------
 
@@ -320,7 +383,14 @@ let
 
       { name = "persistent-dirs"; path = pkgs.writeText "persistent-dirs" persistentManifest; }
     ]
-    ++ pxeFiles
+    ++ lib.optionals (pxeNodeNames != [ ]) (
+      [
+        { name = "nixos-paths"; path = pkgs.writeText "nixos-paths" nixosPaths; }
+      ]
+      ++ pxeFiles
+      ++ pxeIpxeFiles
+      ++ ipxeLkrnFiles
+    )
   );
 
 in
