@@ -6,6 +6,7 @@
 #
 #   etc-hosts.managed   managed block for /etc/hosts (marker-delimited)
 #   ethers.managed      managed block for /etc/ethers (marker-delimited)
+#   exports.managed     managed block for /etc/exports (marker-delimited)
 #   persistent-dirs     manifest of persistent-storage anchors to materialize
 #   pxelinux.cfg/<hexip>  one file per node with a non-null `pxe` profile
 #
@@ -212,6 +213,37 @@ let
     # END netboot-registry managed entries
   '';
 
+  # ---- /etc/exports block ---------------------------------------------------
+  # Whole-tree export of the persistent root: ONE line per client spec,
+  # independent of fleet size. Per-node exports would scale /etc/exports
+  # with the cluster AND couple node boot-time mounts to deploy ordering;
+  # whole-tree keeps the exports block constant (policy, not node data)
+  # and lets any node mount its anchor as long as NFS is up. Client
+  # subnet(s) and options are site policy, declared in the cluster data
+  # (nfs.clients / nfs.options); a missing or empty declaration is a
+  # build-time error, consistent with the placeholder-free rule.
+
+  nfsClients = cluster.nfs.clients or
+    (fail "cluster data is missing nfs.clients (list of client specs, e.g. [ \"10.0.0.0/24\" ])");
+  nfsOptions = cluster.nfs.options or
+    (fail "cluster data is missing nfs.options (export options string, e.g. \"rw,no_root_squash\")");
+  nfsClients' =
+    if nfsClients == [ ] || nfsClients == [ "" ]
+    then fail "nfs.clients must list at least one non-empty client spec"
+    else nfsClients;
+
+  exportsLines = lib.concatStringsSep "\n"
+    (map (client: "${cluster.persistentRoot} ${client}(${nfsOptions})")
+      nfsClients');
+
+  exportsManaged = ''
+    # BEGIN netboot-registry managed exports -- GENERATED FILE, DO NOT EDIT.
+    # Regenerate from the node registry (nodes/*.nix in the cluster repo)
+    # and redeploy with the registry apply script.
+    ${exportsLines}
+    # END netboot-registry managed exports
+  '';
+
   # ---- dnsmasq DHCP reservations -------------------------------------------
   # Replaces /etc/ethers + read-ethers for registry nodes. Installed as a
   # dhcp-hostsfile (one host per line, format = right-hand side of
@@ -311,6 +343,7 @@ let
       { name = "etc-hosts.managed"; path = pkgs.writeText "etc-hosts.managed" hostsManaged; }
       { name = "dnsmasq-registry.conf"; path = pkgs.writeText "dnsmasq-registry.conf" dnsmasqConfFile; }
       { name = "dnsmasq-registry.dhcp-hosts"; path = pkgs.writeText "dnsmasq-registry.dhcp-hosts" dnsmasqDhcpHostsFile; }
+      { name = "exports.managed"; path = pkgs.writeText "exports.managed" exportsManaged; }
       { name = "ethers.managed"; path = pkgs.writeText "ethers.managed" ethersManaged; }
       { name = "persistent-dirs"; path = pkgs.writeText "persistent-dirs" persistentManifest; }
     ]

@@ -32,6 +32,10 @@
 #   /etc/ethers     remove registry-node entries only (DHCP reservations
 #                   moved to the dhcp-hostsfile). Everything else --
 #                   historical entries and read-ethers -- stays.
+#   /etc/exports    replace the marker-delimited managed-exports block
+#                   (whole-tree export of the persistent root; client
+#                   subnet and options come from cluster data), then
+#                   `exportfs -ra` -- no daemon restart needed.
 #   /etc/dnsmasq.d  install netboot-registry.conf ONLY (static pointers;
 #                   config directives are NOT re-read on SIGHUP, so a
 #                   CONTENT change in netboot-registry.conf forces a
@@ -206,7 +210,7 @@ resolve_artifacts() {
 If intentional: rm $RESULT, then rerun."
     fi
     ART=$(readlink -f "$RESULT")
-    for f in etc-hosts.managed ethers.managed dnsmasq-registry.conf \
+    for f in etc-hosts.managed ethers.managed exports.managed dnsmasq-registry.conf \
              dnsmasq-registry.dhcp-hosts persistent-dirs; do
       [ -r "$ART/$f" ] || die "result points at '$target', which is not a registry-artifacts tree (missing $f). Refusing even with --build.
 If intentional: rm $RESULT, then rerun."
@@ -323,6 +327,18 @@ grep -viE "^(${MACS})([[:space:]]|$)" /etc/ethers 2>/dev/null \
   || true
 [ -s "$TMP/ethers.new" ] || : > "$TMP/ethers.new"
 
+# ---- /etc/exports -------------------------------------------------------------
+# New content = current file minus our marker block, with the fresh block
+# appended. Whole-tree export of the persistent root: the client subnet
+# and options are site policy from cluster data, so this block changes
+# only when policy does -- never with node churn. (awk normalizes the
+# trailing newline before appending, keeping the splice idempotent.)
+sed '/^# BEGIN netboot-registry managed exports/,/^# END netboot-registry managed exports/d' \
+  /etc/exports 2>/dev/null \
+  | awk -v block="$ART/exports.managed" \
+      '{ print } END { while ((getline line < block) > 0) print line }' \
+  > "$TMP/exports.new"
+
 # ---- report / apply -----------------------------------------------------------
 if [ "$MODE" = diff ]; then
   echo "=== artifact source: $ART ==="
@@ -330,6 +346,8 @@ if [ "$MODE" = diff ]; then
   diff -u /etc/hosts "$TMP/hosts.new" || true
   echo "=== /etc/ethers (proposed change) ==="
   diff -u /etc/ethers "$TMP/ethers.new" || true
+  echo "=== /etc/exports (proposed change) ==="
+  diff -u /etc/exports "$TMP/exports.new" || true
   for pair in "/etc/dnsmasq.d/netboot-registry.conf:dnsmasq-registry.conf" \
               "/etc/netboot-registry/dhcp-hosts:dnsmasq-registry.dhcp-hosts"; do
     dst=${pair%%:*}; src=${pair##*:}
@@ -382,6 +400,20 @@ if [ -f /etc/ethers ] && ! cmp -s /etc/ethers "$TMP/ethers.new"; then
   cat "$TMP/ethers.new" > /etc/ethers
   CHANGED=1
   echo "ethers: updated"
+fi
+
+EXPORTS_CHANGED=0
+if [ ! -f /etc/exports ]; then
+  cat "$TMP/exports.new" > /etc/exports
+  EXPORTS_CHANGED=1
+  CHANGED=1
+  echo "exports: created"
+elif ! cmp -s /etc/exports "$TMP/exports.new"; then
+  cp --preserve=mode,ownership /etc/exports "$TMP/exports.bak"
+  cat "$TMP/exports.new" > /etc/exports
+  EXPORTS_CHANGED=1
+  CHANGED=1
+  echo "exports: updated"
 fi
 
 # Restart needed if netboot-registry.conf is newly installed OR its
@@ -467,6 +499,22 @@ grep -v '^#' "$ART/persistent-dirs" | awk 'NF' | while read -r mac name; do
   ln -sfn "by-mac/$mac" "$PROOT/$name"
 done
 echo "persistent: anchors + symlinks materialized under $PROOT"
+
+# ---- apply the exports change ---------------------------------------------
+# exportfs -ra re-reads the table live; no daemon restart needed. On
+# failure, restore the previous file and re-export so the kernel table
+# matches the file again.
+if [ "${EXPORTS_CHANGED:-0}" = 1 ]; then
+  if ! exportfs -ra; then
+    echo "$0: exportfs -ra FAILED; restoring previous /etc/exports" >&2
+    [ -f "$TMP/exports.bak" ] && cat "$TMP/exports.bak" > /etc/exports
+    exportfs -ra || warn "exportfs -ra failed even after restoring /etc/exports; inspect by hand"
+    exit 1
+  fi
+  echo "exports: exportfs -ra applied"
+  exportfs -s | grep -qF "$PROOT" \
+    || warn "persistent root not visible in 'exportfs -s' output: $PROOT"
+fi
 
 if [ "${RESTART:-0}" = 1 ]; then
   echo "dnsmasq: restarting ($RESTART_WHY)"
