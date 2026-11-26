@@ -179,7 +179,7 @@ let
   '';
 
   hostsManaged = ''
-    # BEGIN netboot-registry managed entries -- GENERATED FILE, DO NOT EDIT.
+    # BEGIN netboot-registry managed entries -- GENERATED CONTENT, DO NOT EDIT.
     # Regenerate from the node registry (nodes/*.nix in the cluster repo)
     # and redeploy with the registry apply script.
     ${hostsBody}
@@ -210,7 +210,7 @@ let
       nfsClients');
 
   exportsManaged = ''
-    # BEGIN netboot-registry managed exports -- GENERATED FILE, DO NOT EDIT.
+    # BEGIN netboot-registry managed exports -- GENERATED CONTENT, DO NOT EDIT.
     # Regenerate from the node registry (nodes/*.nix in the cluster repo)
     # and redeploy with the registry apply script.
     ${exportsLines}
