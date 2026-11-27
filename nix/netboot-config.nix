@@ -95,15 +95,40 @@ in
   boot.supportedFilesystems = [ "nfs" ];
 
   # One static mount unit for the whole fleet: the node's anchor path is
-  # filled in by %H (hostname at unit-load time). systemd adds the
-  # network-online ordering for network filesystems automatically, same
-  # as a fstab entry would get.
+  # filled in by %H (hostname at unit-load time). The mount is TRIGGERED,
+  # not boot-mounted: the automount unit below is what remote-fs.target
+  # pulls in (instantly), and the real NFS mount starts when something
+  # first touches /persistent. A node's first network can take ~30s to
+  # carry traffic (e.g. switch spanning-tree delay before DHCP even
+  # starts), so a boot-mounted NFS mount sat in the boot path behind
+  # DHCP; with the automount the login prompt never waits for NFS, and
+  # the key-overlay service below -- pulled in by the mount itself --
+  # flips the ssh host keys whenever the anchor actually appears. The
+  # two-key design already defines "baked key = not fully booted", so a
+  # longer baked-key window is the signal working, not a regression.
+  # systemd adds the network-online ordering for network filesystems
+  # automatically, same as a fstab entry would get.
   systemd.mounts = lib.mkIf (persistentDevice != null) [
     {
       what = "${persistentDevice}/%H";
       where = "/persistent";
       type = "nfs";
       options = "rw,noatime";
+      # NOT wanted by remote-fs.target (that would mount it at boot);
+      # the automount unit below is the boot-chain representative. When
+      # the mount DOES complete, it pulls in the key-overlay service.
+      wantedBy = [ ];
+      wants = lib.mkIf (bakedHostKeys != [ ]) [ "nixos-persistent-keys.service" ];
+    }
+  ];
+
+  systemd.automounts = lib.mkIf (persistentDevice != null) [
+    {
+      where = "/persistent";
+      # No idle timeout: the mount must stay up (the key overlay
+      # bind-mounts a subtree, which would pin the mount against an
+      # unmount anyway, and remount churn under sshd is undesirable).
+      # systemd's automount default is already "never idle-unmount".
       wantedBy = [ "remote-fs.target" ];
     }
   ];
@@ -200,47 +225,62 @@ in
   # Admin access is key-only, via the cluster-declared public keys.
   users.users.root.openssh.authorizedKeys.keys = sshAuthorizedKeys;
 
-  # ssh host key overlay: once /persistent is mounted, bind-mount the
-  # anchor's key directory over the baked-key directory and reload sshd.
-  # Everything that is a normal state rather than a failure -- generic
-  # mode, NFS down at boot, anchor without keys yet -- is a no-op with
-  # an explanatory line, never a failed unit. Guarded per baked key file:
-  # reloading sshd with a HostKey path missing would kill it on re-exec.
+  # ssh host key overlay: when /persistent actually mounts (the mount
+  # unit pulls this service in via wants=), bind-mount the anchor's key
+  # directory over the baked-key directory and reload sshd. The boot
+  # chain never waits for this: remote-fs.target only carries the
+  # automount, so the login prompt is up while this worker may still be
+  # waiting for NFS. Everything that is a normal state rather than a
+  # failure -- anchor without keys yet -- is a no-op with an
+  # explanatory line, never a failed unit; a genuinely dead NFS server
+  # ends the unit failed after bounded retries, with the baked key
+  # remaining -- the "not fully booted" signal, by design. Guarded per
+  # baked key file: reloading sshd with a HostKey path missing would
+  # kill it on re-exec.
   systemd.services.nixos-persistent-keys =
     lib.mkIf (bakedHostKeys != [ ]) {
       description = "Overlay persistent ssh host keys over the baked-in ones";
-      wantedBy = [ "remote-fs.target" ];
-      after = [ "remote-fs.target" ];
+      wantedBy = [ ];
+      after = [ "persistent.mount" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        # Each reachability check can block on the automount-triggered
+        # mount job (up to the mount unit's start timeout), so the
+        # default job timeout would kill the retry loop.
+        TimeoutStartSec = "10min";
       };
       # mountpoint(1) and mount(8) come from util-linux, which is NOT in
-      # the unit's default PATH -- without this the check fails with
-      # "command not found" and the unit no-ops ("not mounted") even
-      # when /persistent is mounted (verified on the first boot).
+      # the unit's default PATH -- without this the bind mount fails
+      # with "command not found" (verified on the first boot).
       path = [ pkgs.util-linux ];
-      script = ''
-        keydir="/persistent/etc/ssh/netboot_host_keys"
-        if ! mountpoint -q /persistent; then
-          echo "nixos-persistent-keys: /persistent not mounted (generic mode or NFS down); keeping baked key"
-          exit 0
-        fi
-        if [ ! -d "$keydir" ]; then
-          echo "nixos-persistent-keys: no $keydir in the anchor yet; keeping baked key"
-          exit 0
-        fi
-      '' + lib.concatMapStrings (keyPath:
-        let name = baseNameOf keyPath; in ''
-        if [ ! -s "$keydir/${name}" ]; then
-          echo "nixos-persistent-keys: $keydir/${name} missing; keeping baked key"
-          exit 0
-        fi
-      '') bakedHostKeys + ''
-        mkdir -p ${bakedKeysDir}
-        mount --bind "$keydir" ${bakedKeysDir}
-        systemctl try-reload-or-restart sshd.service || true
-        echo "nixos-persistent-keys: persistent host keys presented"
+      script = let keydir = "/persistent/etc/ssh/netboot_host_keys"; in ''
+        for attempt in 1 2 3; do
+          if mountpoint -q ${bakedKeysDir}; then
+            echo "nixos-persistent-keys: persistent keys already presented"
+            exit 0
+          fi
+          # This stat is the automount trigger point: it starts the
+          # real NFS mount and blocks until it succeeds or fails.
+          if [ -d "${keydir}" ]; then
+        '' + lib.concatMapStrings (keyPath:
+          let name = baseNameOf keyPath; in ''
+            if [ ! -s "${keydir}/${name}" ]; then
+              echo "nixos-persistent-keys: ${keydir}/${name} missing; keeping baked key"
+              exit 0
+            fi
+        '') bakedHostKeys + ''
+            mkdir -p ${bakedKeysDir}
+            mount --bind "${keydir}" ${bakedKeysDir}
+            systemctl try-reload-or-restart sshd.service || true
+            echo "nixos-persistent-keys: persistent host keys presented"
+            exit 0
+          fi
+          echo "nixos-persistent-keys: /persistent not reachable yet (attempt $attempt/3); waiting"
+          sleep 30
+        done
+        echo "nixos-persistent-keys: /persistent unreachable after retries; keeping baked key"
+        exit 1
       '';
     };
 }
