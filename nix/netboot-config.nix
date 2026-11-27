@@ -12,6 +12,12 @@
 # installation-device profiles.  The netboot module is NOT part of the
 # default NixOS module list, so it must be imported explicitly.
 #
+# CLUSTER FEATURES: beyond identity, the config renders data-driven
+# cluster features from the `cluster` argument (shared NFS mounts,
+# per-label local-disk mounts, LDAP, admin users, time/syslog,
+# mdadm/rdma, node exporter, and the netboot-persistent.target
+# activation point) -- every feature is inert without cluster data.
+#
 # The stock udev module is replaced by a patched copy
 # (./udev-nixos-patched.nix): the build host's kernel 4.4 cannot run
 # the systemd 260 tools used by that module's builders (statx(2) is
@@ -77,6 +83,27 @@ let
     if cluster == null then [ ]
     else cluster.nixos.sshAuthorizedKeys or [ ];
 
+  # CLUSTER FEATURES (site data in the private repo's nodes/ch.nix).
+  # Each is data-driven machinery: the public code renders whatever the
+  # cluster declares, and every feature is inert (or absent) in generic
+  # builds and when the cluster omits it. Nothing here is
+  # site-specific; the SITE is in ch.nix.
+  ldap = if cluster == null then null else cluster.ldap or null;
+  adminUsers = if cluster == null then [ ] else cluster.adminUsers or [ ];
+  # mountpoint -> server-side export path (under cluster.nfsServer)
+  sharedMounts =
+    if cluster == null then { } else cluster.sharedMounts or { };
+  mountDirs = if cluster == null then [ ] else cluster.mountDirs or [ ];
+  diskLabels = if cluster == null then [ ] else cluster.diskLabels or [ ];
+  timeServers = if cluster == null then null else cluster.timeServers or null;
+  timeZone = if cluster == null then null else cluster.timeZone or null;
+  logServer = if cluster == null then null else cluster.logServer or null;
+  useRdma = if cluster == null then false else cluster.rdma or false;
+  useSwraid = if cluster == null then false else cluster.swraid or false;
+  mdadmConf = if cluster == null then "" else cluster.nixos.mdadmConf or "";
+  useNodeExporter =
+    if cluster == null then false else cluster.nodeExporter or false;
+
   # Local directory the baked keys are embedded at (also the bind-mount
   # target of the overlay below). Mirrors the anchor-side path
   # <anchor>/etc/ssh/netboot_host_keys (the anchor shadows the rootfs
@@ -112,50 +139,94 @@ in
   # network filesystems on its own (the realized unit carried no such
   # dependency, which is how a mount attempt once fired into a dark
   # network and burned its whole start timeout).
-  systemd.mounts = lib.mkIf (persistentDevice != null) [
-    {
-      what = "${persistentDevice}/%H";
-      where = "/persistent";
+  systemd.mounts = lib.mkMerge [
+    (lib.mkIf (persistentDevice != null) [
+      {
+        what = "${persistentDevice}/%H";
+        where = "/persistent";
+        type = "nfs";
+        options = "rw,noatime";
+        # NOT wanted by remote-fs.target (that would mount it at boot);
+        # the automount unit below is the boot-chain representative. Wait
+        # for a genuinely usable network before the one real mount
+        # attempt: pulled in and ordered after network-online.target (see
+        # the wait-online note above). The trigger (the overlay worker's
+        # stat) may fire long before that -- the MOUNT JOB waits, and
+        # nothing in the boot chain waits for the mount. When the mount
+        # DOES complete, it pulls in the key-overlay service.
+        wantedBy = [ ];
+        wants = [ "network-online.target" ]
+          ++ lib.optionals (bakedHostKeys != [ ]) [ "nixos-persistent-keys.service" ];
+        after = [ "network-online.target" ];
+      }
+    ])
+    # SHARED NFS MOUNTS (cluster.sharedMounts: mountpoint -> server-side
+    # path under cluster.nfsServer) -- triggered automounts like
+    # /persistent: the boot chain never waits for NFS; the real mount
+    # starts on first use and never idles out. hard + nofail: a dead
+    # NFS server hangs accesses (the POSIX behavior users expect from
+    # /home) without failing anything at boot. nfsvers=3 matches the
+    # house exports (no NFSv4 on the server); nointr is obsolete on
+    # modern kernels.
+    (lib.mapAttrsToList (where: what: {
+      what = "${cluster.nfsServer}:${what}";
+      where = where;
       type = "nfs";
-      options = "rw,noatime";
-      # NOT wanted by remote-fs.target (that would mount it at boot);
-      # the automount unit below is the boot-chain representative. Wait
-      # for a genuinely usable network before the one real mount
-      # attempt: pulled in and ordered after network-online.target (see
-      # the wait-online note above). The trigger (the overlay worker's
-      # stat) may fire long before that -- the MOUNT JOB waits, and
-      # nothing in the boot chain waits for the mount. When the mount
-      # DOES complete, it pulls in the key-overlay service.
+      options = "nfsvers=3,rw,noatime,hard";
       wantedBy = [ ];
-      wants = [ "network-online.target" ]
-        ++ lib.optionals (bakedHostKeys != [ ]) [ "nixos-persistent-keys.service" ];
+      wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
-    }
+    }) sharedMounts)
+    # LOCAL DISKS: generic per-label mount units (cluster.diskLabels),
+    # shared by the whole fleet and activated PER NODE via the anchor's
+    # netboot-persistent.target.wants (the house mountbylabel pattern:
+    # a disk's filesystem label names its mountpoint). No boot wiring
+    # (wantedBy=[]): a node without the disks simply never activates
+    # them, and adding a disk to a node is anchor-side work only. Raid
+    # assembly below makes the by-label links appear by multi-user.
+    (map (label: {
+      what = "/dev/disk/by-label/${label}";
+      where = "/${label}";
+      options = "noatime,nodiratime";
+      wantedBy = [ ];
+      mountConfig.TimeoutSec = "10s";
+    }) diskLabels)
   ];
 
-  systemd.automounts = lib.mkIf (persistentDevice != null) [
-    {
-      where = "/persistent";
-      # No idle timeout: the mount must stay up (the key overlay
-      # bind-mounts a subtree, which would pin the mount against an
-      # unmount anyway, and remount churn under sshd is undesirable).
-      # systemd's automount default is already "never idle-unmount".
-      wantedBy = [ "remote-fs.target" ];
-    }
+  systemd.automounts = lib.mkMerge [
+    (lib.mkIf (persistentDevice != null) [
+      {
+        where = "/persistent";
+        # No idle timeout: the mount must stay up (the key overlay
+        # bind-mounts a subtree, which would pin the mount against an
+        # unmount anyway, and remount churn under sshd is undesirable).
+        # systemd's automount default is already "never idle-unmount".
+        wantedBy = [ "remote-fs.target" ];
+      }
+    ])
+    (lib.mapAttrsToList (where: _:
+      {
+        where = where;
+        # No idle timeout: once a session has its home open, an unmount
+        # (and the re-mount churn under it) is worse than staying up.
+        wantedBy = [ "remote-fs.target" ];
+      }) sharedMounts)
   ];
 
   # Baked-in ssh host keys: copied from the stable external source into
   # the store by the build (stable across image rebuilds) and installed
-  # at a fixed path, 0600.
-  environment.etc = lib.mkIf (bakedHostKeys != [ ]) (
-    builtins.listToAttrs (map (keyPath: {
-      name = "ssh/netboot_host_keys/${baseNameOf keyPath}";
-      value = {
-        source = /. + keyPath;
-        mode = "0600";
-      };
-    }) bakedHostKeys)
-  );
+  # at a fixed path, 0600. (One module, one assignment.)
+  environment.etc = lib.mkMerge [
+    (lib.mkIf (bakedHostKeys != [ ]) (
+      builtins.listToAttrs (map (keyPath: {
+        name = "ssh/netboot_host_keys/${baseNameOf keyPath}";
+        value = {
+          source = /. + keyPath;
+          mode = "0600";
+        };
+      }) bakedHostKeys)
+    ))
+  ];
 
   # The hostname comes from the kernel cmdline (systemd.hostname=,
   # rendered per node by the registry). The installer-profile default
@@ -248,7 +319,24 @@ in
   systemd.services.NetworkManager-wait-online.serviceConfig.TimeoutStartSec = "90s";
 
   # Admin access is key-only, via the cluster-declared public keys.
-  users.users.root.openssh.authorizedKeys.keys = sshAuthorizedKeys;
+  # Merged with the cluster-features admin accounts further down
+  # (one module, one assignment).
+  users.users = lib.mkMerge [
+    { root.openssh.authorizedKeys.keys = sshAuthorizedKeys; }
+    # Local admin accounts (LDAP handles ordinary users). Homes live
+    # on the shared /home mount -- createHome is false so the node
+    # never mkdirs into NFS (the accounts are identity, not home
+    # providers).
+    (builtins.listToAttrs (map (u: {
+      name = u.name;
+      value = {
+        uid = u.uid;
+        isNormalUser = true;
+        home = "/home/${u.name}";
+        createHome = false;
+      };
+    }) adminUsers))
+  ];
 
   # ssh host key overlay: when /persistent actually mounts (the mount
   # unit pulls this service in via wants=), bind-mount the anchor's key
@@ -308,6 +396,47 @@ in
               mount --bind "$mid" /etc/machine-id
               echo "nixos-persistent-keys: persistent machine-id presented"
             fi
+        '' +
+        # CLUSTER FEATURE ACTIVATION: the anchor shadows rootfs paths for
+        # per-node state. NetworkManager connection profiles (the fabric
+        # addresses -- static keyfiles, not DHCP) are bind-mounted over
+        # the rootfs dir and NM reloaded so they apply without a boot.
+        # Then the cluster feature target: its wants directory lives in
+        # the ANCHOR (etc/systemd/system/ under the anchor, mirroring
+        # the rootfs layout). /etc/systemd/system itself is a read-only
+        # store symlink on NixOS, so the anchor's wants entries are
+        # mirrored into /run/systemd/system/<target>.wants/ instead --
+        # /run is a first-class unit search path (any .wants directory
+        # there is honored) and writable with no mount tricks. The
+        # mirror + daemon-reload + target start is what activates the
+        # per-node units (local disk mounts, node services). Nothing
+        # before this point reads the anchor's wants dir (it lives on
+        # /persistent -- an earlier scan would trigger the automount
+        # and block boot).
+        ''
+            nm_conf="/persistent/etc/NetworkManager/system-connections"
+            if [ -d "$nm_conf" ]; then
+              if ! mountpoint -q /etc/NetworkManager/system-connections; then
+                mkdir -p /etc/NetworkManager/system-connections
+                mount --bind "$nm_conf" /etc/NetworkManager/system-connections
+              fi
+              systemctl reload NetworkManager || true
+              echo "nixos-persistent-keys: persistent NetworkManager profiles presented"
+            fi
+            anchor_wants="/persistent/etc/systemd/system/netboot-persistent.target.wants"
+            run_wants="/run/systemd/system/netboot-persistent.target.wants"
+            if [ -d "$anchor_wants" ]; then
+              mkdir -p "$run_wants"
+              for u in "$anchor_wants"/*; do
+                ln -sfn "$u" "$run_wants/$(basename "$u")"
+              done
+              systemctl daemon-reload
+              systemctl start netboot-persistent.target \
+                || echo "nixos-persistent-keys: WARNING: netboot-persistent.target failed to start"
+              echo "nixos-persistent-keys: cluster features activated"
+            else
+              echo "nixos-persistent-keys: no cluster wants dir in anchor (anchor created before profiles?)"
+            fi
         '' + lib.concatMapStrings (keyPath:
           let name = baseNameOf keyPath; in ''
             if [ ! -s "${keydir}/${name}" ]; then
@@ -347,5 +476,93 @@ in
       OnUnitActiveSec = "2min";
       Unit = "nixos-persistent-keys.service";
     };
+  };
+
+  # ------------------------------------------------------------------
+  # CLUSTER FEATURES (data-driven; see the let block at the top). All
+  # of this is machinery -- every value comes from the private repo's
+  # node data, nothing here is site-specific.
+  # ------------------------------------------------------------------
+  # (Shared NFS mounts and per-label disk mount units are rendered in
+  # the merged systemd.mounts / systemd.automounts assignments above;
+  # the activation point's anchor-side wants-dir symlink lives in the
+  # merged environment.etc assignment.)
+
+  # Directories that must exist on every node (most are the local-disk
+  # mountpoints; mount units create their own, but an explicit rule
+  # keeps the layout honest and covers non-mount dirs like /gluster).
+  systemd.tmpfiles.rules = map (d: "d ${d} 0755 root root - -") mountDirs;
+
+  # CLUSTER FEATURE TARGET: the per-node activation point. Its wants
+  # directory lives in the ANCHOR (etc/systemd/system/ under the
+  # anchor); the worker mirrors it into /run/systemd/system/ and
+  # starts the target after the key flip. It is NOT part of the boot
+  # chain: nothing wants it at boot, so the anchor-backed wants dir is
+  # never scanned early (which would trigger the /persistent automount
+  # and block boot).
+  systemd.targets."netboot-persistent" = lib.mkIf (cluster != null) {
+    description = "Per-node persistent-tree cluster features";
+    wantedBy = [ ];
+  };
+
+  # LDAP users: nss/pam via nslcd (the daemon form; the house server
+  # allows anonymous binds, so no bind credentials are declared).
+  users.ldap = lib.mkIf (ldap != null) {
+    enable = true;
+    daemon.enable = true;
+    server = ldap.server;
+    base = ldap.base;
+  };
+
+  # (Local admin accounts are merged into users.users up above, with
+  # root's authorized keys.)
+
+  # Time: NTP source is the head node (the fleet has no outside NTP
+  # route); mkForce replaces the module's default public pool -- a
+  # netboot fleet must never leak ntp queries or depend on them. The
+  # timesyncd primary AND fallback are both pinned (the fallback
+  # option defaults to networking.timeServers, so forcing the primary
+  # alone would leave a doubled list).
+  time.timeZone = lib.mkIf (timeZone != null) timeZone;
+  networking.timeServers =
+    lib.mkIf (timeServers != null) (lib.mkForce timeServers);
+  services.timesyncd = lib.mkIf (timeServers != null) {
+    enable = true;
+    servers = lib.mkForce timeServers;
+    fallbackServers = lib.mkForce timeServers;
+  };
+
+  # Remote syslog: forward everything to the log server (UDP, the
+  # house convention). rsyslogd's defaultConfig keeps local logging,
+  # so nodes log locally AND forward.
+  services.rsyslogd = lib.mkIf (logServer != null) {
+    enable = true;
+    extraConfig = ''
+      # Everything to the log server.
+      *.* @${logServer}
+    '';
+  };
+
+  # mdadm software RAID: stage-1 assembly + the mdadm monitor, so the
+  # by-label links for the disk mounts above exist by multi-user.
+  boot.swraid.enable = lib.mkIf useSwraid true;
+  boot.swraid.mdadmConf = lib.mkIf (useSwraid && mdadmConf != "") mdadmConf;
+
+  # Fabric RDMA (100GbE Mellanox): the kernel drivers plus rdma-core
+  # userspace (verbs, udev naming helpers).
+  boot.kernelModules = lib.mkIf useRdma [ "mlx5_ib" "ib_uverbs" ];
+  environment.systemPackages = lib.mkIf useRdma [ pkgs.rdma-core ];
+
+  # Prometheus node exporter, oriented like the house install: the
+  # ethtool collector on, the same filesystem exclusion regex (keeps
+  # ephemeral/gluster mounts out of per-mount series), and the port
+  # open should a node ever enable its firewall.
+  services.prometheus.exporters.node = lib.mkIf useNodeExporter {
+    enable = true;
+    openFirewall = true;
+    enabledCollectors = [ "ethtool" ];
+    extraFlags = [
+      "--collector.filesystem.mount-points-exclude=^/(dev|proc|run|sys|mnt|media|gluster|var/lib/docker/.+|var/lib/containers/storage/.+)($|/)"
+    ];
   };
 }
