@@ -198,6 +198,14 @@ in
   services.openssh = {
     enable = true;
     settings.PermitRootLogin = "prohibit-password";
+    # ssh-keyscan probes every host-key algorithm in parallel; a node
+    # serving only ed25519 answers ~4 of every 5 probe connections
+    # with a failed negotiation, and OpenSSH's per-source penalties
+    # (enabled by default in recent sshd) then start refusing the
+    # probing address -- which masquerades as "node down" precisely
+    # when admins are checking the not-fully-booted signal. Key-only
+    # auth makes brute-force penalties redundant on these nodes; off.
+    settings.PerSourcePenalties = "no";
     hostKeys = lib.mkIf (bakedHostKeys != [ ]) (
       map (keyPath: {
         path = "${bakedKeysDir}/${baseNameOf keyPath}";
