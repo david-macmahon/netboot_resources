@@ -394,7 +394,11 @@ let
         # the image's %H mount unit expand to this node's anchor path.
         # It also puts the right name in the DHCP request, so dnsmasq
         # registers it in DNS.
-        set cmdline ${cluster.nixos.console} systemd.hostname=${name}
+        # nokaslr: KASLR's randomized decompression target clobbered the
+        # ~500MB initrd in memory under BIOS+iPXE on the first boot
+        # ("invalid magic at start of compressed archive" panic); with
+        # nokaslr the kernel decompresses to its fixed address and boots.
+        set cmdline ${cluster.nixos.console} nokaslr systemd.hostname=${name}
         chain ${cluster.nixos.httpBaseUrl}/netboot.ipxe
       '';
     }) pxeNodeNames;
