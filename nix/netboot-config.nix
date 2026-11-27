@@ -293,15 +293,22 @@ in
       '';
     };
 
-  # The overlay worker's dispatch: fires once, 5s after boot. timers.
-  # target sits in the boot chain but its jobs block nothing -- the
-  # login prompt is unaffected no matter how long NFS takes. The
-  # timer's start of the worker is the first access under the
-  # automount, which starts the real NFS mount.
+  # The overlay worker's dispatch: fires 5s after boot, then re-fires
+  # every 2 minutes until the flip sticks. The repeat matters: the
+  # network can come up well past the first dispatch (a lease that
+  # lands late makes mount attempts fail INSTANTLY with "network
+  # unreachable", so the worker can burn all its attempts in under a
+  # minute and give up), and without a re-dispatch nothing would ever
+  # touch the mountpoint again. After a successful flip the unit stays
+  # active (RemainAfterExit), so subsequent elapses are no-ops; after
+  # a failed dispatch the next elapse starts it fresh. timers.target
+  # jobs block nothing -- the login prompt is unaffected no matter how
+  # long NFS takes.
   systemd.timers.nixos-persistent-keys = lib.mkIf (bakedHostKeys != [ ]) {
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "5s";
+      OnUnitActiveSec = "2min";
       Unit = "nixos-persistent-keys.service";
     };
   };
