@@ -448,7 +448,7 @@ if [ "$MODE" = diff ]; then
     fi
     # Per-node hexip SYMLINKS (hexip -> shared menu), manifest-driven.
     if [ -r "$ART/pxe-symlinks" ]; then
-      echo "  --- per-node hexip symlinks (pxelinux.cfg/<hexip> -> shared menu) ---"
+      echo "=== per-node hexip symlinks (pxelinux.cfg/<hexip> -> shared menu) ==="
       grep -v '^#' "$ART/pxe-symlinks" | awk 'NF' \
         | while read -r hexip target; do
             if [ -L "$TFTPDIR/pxelinux.cfg/$hexip" ] \
@@ -474,7 +474,7 @@ if [ "$MODE" = diff ]; then
       fi
     done
     # Image payload symlinks (the image build maintains PAYLOADDIR).
-    echo "  --- image payload symlinks (payload dir -> HTTP dir) ---"
+    echo "=== image payload symlinks (payload dir -> HTTP dir) ==="
     for f in bzImage initrd netboot.ipxe; do
       if [ -L "$HTTPDIR/$f" ] && [ "$(readlink "$HTTPDIR/$f")" = "$PAYLOADDIR/$f" ]; then
         echo "  ln -sfn $PAYLOADDIR/$f $f  (already in place)"
