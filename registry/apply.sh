@@ -36,17 +36,19 @@
 #                   (whole-tree export of the persistent root; client
 #                   subnet and options come from cluster data), then
 #                   `exportfs -ra` -- no daemon restart needed.
-#   TFTP/HTTP trees when any node has a `pxe` profile (the nixos-paths
-#                   manifest names the tree locations): install
-#                   pxelinux.cfg/<hexip> menus + ipxe.lkrn into the TFTP
-#                   tree, and nixos-netboot/<name>.ipxe scripts + image
-#                   payload symlinks into the HTTP tree. Installs are
-#                   whole-file: install(1) unlinks the destination first
-#                   (the hand-era hexip entries are symlink chains; never
-#                   write through one). Registry-generated files missing
-#                   from the current artifact tree are withdrawn
-#                   (deleted) -- pxe profile -> null returns the node to
-#                   the site default via pxelinux's fallback cascade.
+#   TFTP/HTTP trees when the cluster declares `nixos` facts (the
+#                   nixos-paths manifest names the tree locations): install
+#                   the shared pxelinux.cfg/<profile> menus + ipxe.lkrn
+#                   into the TFTP tree, and the shared dispatch.ipxe +
+#                   per-node by-mac/<mac>.ipxe scripts + image payload
+#                   symlinks into the HTTP tree. Per-node hexip entries
+#                   are SYMLINKS to the shared menus (manifest-driven,
+#                   the hand-era tree shape). Installs are whole-file:
+#                   install(1) unlinks the destination first. Registry-
+#                   generated content missing from the current artifact
+#                   tree is withdrawn (deleted) -- pxe profile -> null
+#                   returns the node to the site default via pxelinux's
+#                   fallback cascade.
 #   /etc/dnsmasq.d  install netboot-registry.conf ONLY (static pointers;
 #                   config directives are NOT re-read on SIGHUP, so a
 #                   CONTENT change in netboot-registry.conf forces a
@@ -441,30 +443,65 @@ if [ "$MODE" = diff ]; then
         echo "=== $dst (NEW or changed; $(stat -c%s "$ART/ipxe.lkrn") bytes) ==="
       fi
     fi
+    # Per-node hexip SYMLINKS (hexip -> shared menu), manifest-driven.
+    if [ -r "$ART/pxe-symlinks" ]; then
+      grep -v '^#' "$ART/pxe-symlinks" | awk 'NF' \
+        | while read -r hexip target; do
+            if [ -L "$TFTPDIR/pxelinux.cfg/$hexip" ] \
+               && [ "$(readlink "$TFTPDIR/pxelinux.cfg/$hexip")" = "$target" ]; then
+              echo "  ln -sfn $target $hexip  (already in place)"
+            else
+              echo "  ln -sfn $target $hexip  (NEW or retargeted)"
+            fi
+          done
+    fi
     echo "=== HTTP tree under $HTTPDIR ==="
-    for f in "$ART"/nixos-netboot/*.ipxe; do
-      dst="$HTTPDIR/$(basename "$f")"
+    for f in $(cd "$ART" && find nixos-netboot -type f -name '*.ipxe'); do
+      dst="$HTTPDIR/$f"
       if [ -f "$dst" ] && ! [ -L "$dst" ]; then
         echo "=== $dst (proposed change) ==="
-        diff -u "$dst" "$f" || true
+        diff -u "$dst" "$ART/$f" || true
       else
         echo "=== $dst (NEW file) ==="
-        sed 's/^/  + /' "$f"
+        sed 's/^/  + /' "$ART/$f"
       fi
     done
-    # Withdrawal preview: registry-generated files (by marker) in the
-    # live trees that the current artifact set no longer contains.
-    for f in $(find "$TFTPDIR/pxelinux.cfg" -maxdepth 1 -type f \
-                 -name '[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]' 2>/dev/null) \
-             $(find "$HTTPDIR" -maxdepth 1 -type f -name '*.ipxe' 2>/dev/null); do
-      grep -q "netboot-registry-managed" "$f" 2>/dev/null || continue
+    # Withdrawal previews: registry-generated content (by marker, or by
+    # symlink target) in the live trees that the current artifact set
+    # no longer contains.
+    while IFS= read -r -d '' f; do
       base=$(basename "$f")
-      [ "$base" = netboot.ipxe ] && continue
-      if [ ! -e "$ART/pxelinux.cfg/$base" ] && [ ! -e "$ART/nixos-netboot/$base" ]; then
-        echo "=== STALE (registry-generated; will be REMOVED) ==="
-        echo "    $f"
+      grep -q "netboot-registry-managed" "$f" 2>/dev/null || continue
+      [ -e "$ART/pxelinux.cfg/$base" ] && continue
+      echo "=== STALE (registry-generated; will be REMOVED) ==="
+      echo "    $f"
+    done < <(find "$TFTPDIR/pxelinux.cfg" -maxdepth 1 -type f -print0 2>/dev/null)
+    if [ ! -e "$ART/ipxe.lkrn" ] && [ -f "$TFTPDIR/ipxe.lkrn" ]; then
+      echo "=== STALE (registry-generated; will be REMOVED) ==="
+      echo "    $TFTPDIR/ipxe.lkrn"
+    fi
+    while IFS= read -r -d '' link; do
+      target=$(readlink "$link") || continue
+      tgtbase=$(basename "$target")
+      owned=0
+      [ -e "$ART/pxelinux.cfg/$tgtbase" ] && owned=1
+      if [ "$owned" = 0 ] && [ -f "$TFTPDIR/pxelinux.cfg/$tgtbase" ]; then
+        grep -q "netboot-registry-managed" "$TFTPDIR/pxelinux.cfg/$tgtbase" 2>/dev/null && owned=1
       fi
-    done
+      [ "$owned" = 1 ] || continue
+      hexip=$(basename "$link")
+      if [ ! -r "$ART/pxe-symlinks" ] || ! grep -q "^$hexip " "$ART/pxe-symlinks"; then
+        echo "=== STALE (registry-generated; will be REMOVED) ==="
+        echo "    $link -> $target"
+      fi
+    done < <(find "$TFTPDIR/pxelinux.cfg" -maxdepth 1 -type l -print0 2>/dev/null)
+    while IFS= read -r -d '' f; do
+      rel=${f#"$HTTPDIR"/}
+      grep -q "netboot-registry-managed" "$f" 2>/dev/null || continue
+      [ -e "$ART/nixos-netboot/$rel" ] && continue
+      echo "=== STALE (registry-generated; will be REMOVED) ==="
+      echo "    $f"
+    done < <(find "$HTTPDIR" -type f -name '*.ipxe' -print0 2>/dev/null)
   fi
   echo "=== dnsmasq action ==="
   if [ ! -f /etc/dnsmasq.d/netboot-registry.conf ]; then
@@ -611,45 +648,80 @@ if [ "${EXPORTS_CHANGED:-0}" = 1 ]; then
 fi
 
 # ---- TFTP/HTTP trees for the PXE artifacts ---------------------------------
-# Whole-file installs; `install` UNLINKS the destination first, which is
-# load-bearing: the hand-era pxelinux.cfg/<hexip> entries are SYMLINK
-# CHAINS (hexip -> node name -> menu file), and writing through a symlink
-# with cp/cat would clobber the shared menu file at the end of the chain.
-# install replaces the link with a real file instead. Withdrawal is
-# DELETION: a `pxe` profile -> null returns the node to the site default
-# via pxelinux's fallback cascade. Only files carrying the registry
-# marker are ever withdrawn; hand-era files and symlinks are left alone.
+# Whole-file installs; `install` UNLINKS the destination first. Withdrawal
+# is DELETION: a `pxe` profile -> null removes the node's hexip symlink
+# and MAC-keyed iPXE script, returning the node to the site default via
+# pxelinux's fallback cascade. Only registry-generated content is ever
+# withdrawn: files by their "netboot-registry-managed" marker, hexip
+# symlinks by their target (a marker-carrying shared menu). Hand-era
+# files and symlinks are left alone.
 if [ -n "$TFTPDIR" ]; then
-  mkdir -p "$TFTPDIR/pxelinux.cfg" "$HTTPDIR"
-  # Image payloads served next to the per-node scripts: the scripts'
-  # `chain netboot.ipxe` is relative and resolves here. The image build
+  mkdir -p "$TFTPDIR/pxelinux.cfg" "$HTTPDIR/by-mac"
+  # Image payloads served next to the scripts: the scripts' `chain
+  # netboot.ipxe` is relative and resolves here. The image build
   # maintains /home/nix/build/result; these symlinks follow it.
   for f in bzImage initrd netboot.ipxe; do
     [ -e "/home/nix/build/result/$f" ] \
       || die "image payload missing: /home/nix/build/result/$f (build the image first)"
     ln -sfn "/home/nix/build/result/$f" "$HTTPDIR/$f"
   done
+  # Shared menus (marker-carrying regular files; install unlinks first).
   if [ -d "$ART/pxelinux.cfg" ]; then
     find "$ART/pxelinux.cfg" -maxdepth 1 -type f \
       -exec install -m 644 {} "$TFTPDIR/pxelinux.cfg/" \;
   fi
+  # Per-node hexip SYMLINKS, manifest-driven. -f replaces anything in the
+  # way, including hand-era symlinks when the registry takes over a node.
+  if [ -r "$ART/pxe-symlinks" ]; then
+    grep -v '^#' "$ART/pxe-symlinks" | awk 'NF' \
+      | while read -r hexip target; do
+          ln -sfn "$target" "$TFTPDIR/pxelinux.cfg/$hexip"
+        done
+  fi
   if [ -e "$ART/ipxe.lkrn" ]; then
     install -m 644 "$ART/ipxe.lkrn" "$TFTPDIR/ipxe.lkrn"
   fi
-  find "$ART/nixos-netboot" -maxdepth 1 -type f -name '*.ipxe' \
-    -exec install -m 644 {} "$HTTPDIR/" \;
-  echo "pxe: $(find "$ART/pxelinux.cfg" -maxdepth 1 -type f 2>/dev/null | wc -l) pxelinux.cfg file(s) + $(find "$ART/nixos-netboot" -maxdepth 1 -type f 2>/dev/null | wc -l) ipxe script(s) installed under $TFTPDIR and $HTTPDIR"
-  for f in $(find "$TFTPDIR/pxelinux.cfg" -maxdepth 1 -type f \
-               -name '[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]' 2>/dev/null) \
-           $(find "$HTTPDIR" -maxdepth 1 -type f -name '*.ipxe' 2>/dev/null); do
-    grep -q "netboot-registry-managed" "$f" 2>/dev/null || continue
-    base=$(basename "$f")
-    [ "$base" = netboot.ipxe ] && continue
-    if [ ! -e "$ART/pxelinux.cfg/$base" ] && [ ! -e "$ART/nixos-netboot/$base" ]; then
-      rm -f "$f"
-      echo "pxe: withdrew $base (pxe profile removed; node returns to site default)"
+  # Shared dispatcher + per-node MAC-keyed scripts.
+  if [ -f "$ART/nixos-netboot/dispatch.ipxe" ]; then
+    install -m 644 "$ART/nixos-netboot/dispatch.ipxe" "$HTTPDIR/dispatch.ipxe"
+  fi
+  find "$ART/nixos-netboot/by-mac" -maxdepth 1 -type f -name '*.ipxe' \
+    -exec install -m 644 {} "$HTTPDIR/by-mac/" \;
+  echo "pxe: $(find "$ART/pxelinux.cfg" -maxdepth 1 -type f 2>/dev/null | wc -l) shared menu(s), $(grep -cv '^#\|^$' "$ART/pxe-symlinks" 2>/dev/null || echo 0) hexip link(s), $(find "$ART/nixos-netboot/by-mac" -maxdepth 1 -type f 2>/dev/null | wc -l) ipxe script(s)"
+  # Withdrawals.
+  while IFS= read -r -d '' link; do
+    target=$(readlink "$link") || continue
+    tgtbase=$(basename "$target")
+    owned=0
+    [ -e "$ART/pxelinux.cfg/$tgtbase" ] && owned=1
+    if [ "$owned" = 0 ] && [ -f "$TFTPDIR/pxelinux.cfg/$tgtbase" ]; then
+      grep -q "netboot-registry-managed" "$TFTPDIR/pxelinux.cfg/$tgtbase" 2>/dev/null && owned=1
     fi
-  done
+    [ "$owned" = 1 ] || continue
+    hexip=$(basename "$link")
+    if [ ! -r "$ART/pxe-symlinks" ] || ! grep -q "^$hexip " "$ART/pxe-symlinks"; then
+      rm -f "$link"
+      echo "pxe: withdrew symlink $hexip (pxe profile removed; node returns to site default)"
+    fi
+  done < <(find "$TFTPDIR/pxelinux.cfg" -maxdepth 1 -type l -print0 2>/dev/null)
+  while IFS= read -r -d '' f; do
+    base=$(basename "$f")
+    grep -q "netboot-registry-managed" "$f" 2>/dev/null || continue
+    [ -e "$ART/pxelinux.cfg/$base" ] && continue
+    rm -f "$f"
+    echo "pxe: withdrew $base"
+  done < <(find "$TFTPDIR/pxelinux.cfg" -maxdepth 1 -type f -print0 2>/dev/null)
+  if [ ! -e "$ART/ipxe.lkrn" ] && [ -f "$TFTPDIR/ipxe.lkrn" ]; then
+    rm -f "$TFTPDIR/ipxe.lkrn"
+    echo "pxe: withdrew ipxe.lkrn"
+  fi
+  while IFS= read -r -d '' f; do
+    rel=${f#"$HTTPDIR"/}
+    grep -q "netboot-registry-managed" "$f" 2>/dev/null || continue
+    [ -e "$ART/nixos-netboot/$rel" ] && continue
+    rm -f "$f"
+    echo "pxe: withdrew $rel"
+  done < <(find "$HTTPDIR" -type f -name '*.ipxe' -print0 2>/dev/null)
 fi
 
 if [ "${RESTART:-0}" = 1 ]; then

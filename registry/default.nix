@@ -8,8 +8,10 @@
 #   exports.managed     managed block for /etc/exports (marker-delimited)
 #   persistent-dirs     manifest of persistent-storage anchors to materialize
 #   nixos-paths         TFTP/HTTP tree locations for the PXE artifacts
-#   pxelinux.cfg/<hexip>       per-node menu, for nodes with a `pxe` profile
-#   nixos-netboot/<name>.ipxe  per-node iPXE chain script (HTTP tree)
+#   pxelinux.cfg/<profile>     shared menu, per pxe profile in use
+#   pxe-symlinks        manifest of hexip -> shared-menu symlinks to manage
+#   nixos-netboot/dispatch.ipxe    shared iPXE MAC dispatcher
+#   nixos-netboot/by-mac/<mac>.ipxe  per-node iPXE chain script (HTTP tree)
 #   ipxe.lkrn                  pxelinux->iPXE chainloader (nixpkgs ipxe)
 #
 # Cluster value shape (site data lives in the private cluster repo):
@@ -287,27 +289,31 @@ let
       (map (name: "${normMac checkedNodes.${name}.mac} ${name}") persistentNodes)}
   '';
 
-  # ---- per-node PXE files ----------------------------------------------------
-  # Two artifact families per node with a non-null `pxe` profile:
-  #   pxelinux.cfg/<hexip>       (TFTP tree) house-style menu whose nixos
-  #                              label boots ipxe.lkrn and chains the
-  #                              node's iPXE script over HTTP
-  #   nixos-netboot/<name>.ipxe  (HTTP tree) sets the per-node cmdline
-  #                              (console + hostname= identity trigger)
-  #                              and chains the image's netboot.ipxe
-  #                              (relative -> same HTTP directory)
-  # Profiles are defined here in the machinery; site data references them
-  # by name and supplies the site facts (nixos.* in the cluster data).
-  # An unknown profile is a build error.
+  # ---- PXE boot artifacts ----------------------------------------------------
+  # For each pxe profile in use, the machinery renders ONE shared TFTP menu
+  # and a shared HTTP dispatcher; per-node identity lives in MAC-keyed iPXE
+  # scripts (HTTP tree). The per-node TFTP entries are SYMLINKS (hexip ->
+  # shared menu), created/removed by the apply script -- the hand-era tree
+  # shape, restored: hexip entries point at named menu files, never at
+  # per-node generated files. Only the iPXE scripts are per-node, and they
+  # are keyed by MAC -- the same key as the persistent-storage anchors.
   #
-  # Whole-file artifacts carry a "netboot-registry-managed" marker line:
+  # The dispatcher resolves the boot NIC's MAC via iPXE's ${netX/mac}
+  # built-in setting (note the escaped antiquotation below: Nix must not
+  # interpolate it). Unknown MACs chain to a missing file and drop the
+  # node at the iPXE prompt -- only nodes the registry steered here can
+  # reach the dispatcher at all.
+  #
+  # Whole-file artifacts carry a "netboot-registry-managed" marker line
+  # (AFTER #!ipxe for scripts -- iPXE sniffs the magic at file start):
   # apply.sh uses it to distinguish registry-generated files from
-  # hand-era files in the shared TFTP/HTTP trees (withdrawal = deletion).
+  # hand-era content. Registry-owned hexip SYMLINKS are identified by
+  # their target (a marker-carrying menu file or a rendered menu).
 
   pxeMarker = "netboot-registry-managed";
 
   pxeProfiles = {
-    nixos = { name }: ''
+    nixos = ''
       UI menu.c32
       MENU TITLE ${cluster.nixos.menuTitle}
       TIMEOUT 50
@@ -318,7 +324,7 @@ let
       LABEL nixos
           MENU LABEL NixOS (netboot)
           KERNEL ipxe.lkrn
-          APPEND chain ${cluster.nixos.httpBaseUrl}/${name}.ipxe
+          APPEND chain ${cluster.nixos.httpBaseUrl}/dispatch.ipxe
     '';
     # extended as further boot profiles are integrated
   };
@@ -336,20 +342,36 @@ let
       true)
     pxeNodeNames;
 
-  pxeFiles = map (name:
-    { name = "pxelinux.cfg/${hexip checkedNodes.${name}.ip}";
-      path = pkgs.writeText "pxelinux.cfg-${hexip checkedNodes.${name}.ip}"
-        ("# ${pxeMarker} pxelinux config -- GENERATED CONTENT, DO NOT EDIT.\n" +
-         pxeProfiles.${checkedNodes.${name}.pxe} { inherit name; });
-    }) pxeNodeNames;
+  # Shared menus: only profiles actually in use are rendered.
+  pxeProfilesInUse = lib.unique
+    (map (name: checkedNodes.${name}.pxe) pxeNodeNames);
 
-  # Per-node iPXE scripts. The marker comment is AFTER the #!ipxe magic
-  # line: iPXE detects scripts by the magic bytes at the START of the file.
-  # `chain netboot.ipxe` is relative and resolves against this script's own
-  # URL, so the image payloads must be served from the same HTTP directory.
+  pxeMenuFiles = map (profile:
+    { name = "pxelinux.cfg/${profile}";
+      path = pkgs.writeText "pxelinux.cfg-${profile}"
+        ("# ${pxeMarker} pxelinux config -- GENERATED CONTENT, DO NOT EDIT.\n" +
+         pxeProfiles.${profile});
+    }) pxeProfilesInUse;
+
+  pxeDispatch = {
+    name = "nixos-netboot/dispatch.ipxe";
+    path = pkgs.writeText "nixos-netboot-dispatch.ipxe" ''
+      #!ipxe
+      # ${pxeMarker} iPXE dispatcher -- GENERATED CONTENT, DO NOT EDIT.
+      # Chains the boot NIC's per-node script (MAC-keyed). Regenerate from
+      # the node registry and redeploy with the registry apply script.
+      chain ${cluster.nixos.httpBaseUrl}/by-mac/''${netX/mac}.ipxe
+    '';
+  };
+
+  # Per-node iPXE scripts, MAC-keyed. The marker comment is AFTER the
+  # #!ipxe magic line: iPXE detects scripts by the magic bytes at the
+  # START of the file. `chain netboot.ipxe` is relative and resolves
+  # against this script's own URL, so the image payloads must be served
+  # from the same HTTP directory.
   pxeIpxeFiles = map (name:
-    { name = "nixos-netboot/${name}.ipxe";
-      path = pkgs.writeText "nixos-netboot-${name}.ipxe" ''
+    { name = "nixos-netboot/by-mac/${normMac checkedNodes.${name}.mac}.ipxe";
+      path = pkgs.writeText "nixos-netboot-by-mac-${normMac checkedNodes.${name}.mac}.ipxe" ''
         #!ipxe
         # ${pxeMarker} iPXE script -- GENERATED CONTENT, DO NOT EDIT.
         # Regenerate from the node registry (nodes/*.nix in the cluster
@@ -364,6 +386,16 @@ let
   ipxeLkrnFiles = lib.optionals (pxeNodeNames != [ ]) [
     { name = "ipxe.lkrn"; path = "${pkgs.ipxe}/ipxe.lkrn"; }
   ];
+
+  # Registry-managed pxelinux.cfg/<hexip> SYMLINKS: <hexip> <target-menu>.
+  # The apply script creates these links (replacing anything in the way)
+  # and removes registry-owned links no longer listed here.
+  pxeSymlinks = ''
+    ${lib.concatStringsSep "\n"
+      (map (name:
+        "${hexip checkedNodes.${name}.ip} ${checkedNodes.${name}.pxe}")
+        pxeNodeNames)}
+  '';
 
   # Head-node layout facts the apply script needs (where the TFTP/HTTP
   # trees live). Parsed from the header lines, persistent-dirs style.
@@ -383,11 +415,15 @@ let
 
       { name = "persistent-dirs"; path = pkgs.writeText "persistent-dirs" persistentManifest; }
     ]
+    ++ lib.optionals (cluster ? nixos) [
+      { name = "nixos-paths"; path = pkgs.writeText "nixos-paths" nixosPaths; }
+    ]
     ++ lib.optionals (pxeNodeNames != [ ]) (
       [
-        { name = "nixos-paths"; path = pkgs.writeText "nixos-paths" nixosPaths; }
+        { name = "pxe-symlinks"; path = pkgs.writeText "pxe-symlinks" pxeSymlinks; }
       ]
-      ++ pxeFiles
+      ++ pxeMenuFiles
+      ++ [ pxeDispatch ]
       ++ pxeIpxeFiles
       ++ ipxeLkrnFiles
     )
