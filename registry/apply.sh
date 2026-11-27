@@ -423,7 +423,7 @@ if [ "$MODE" = diff ]; then
         printf '  mkdir -p %s/by-mac/%s; ln -sfn by-mac/%s %s/%s\n' \
           "$PROOT" "$mac" "$mac" "$PROOT" "$name"
         # Per-node ssh host key (apply generates it if absent; idempotent).
-        key="$PROOT/by-mac/$mac/.ssh-host-keys/ssh_host_ed25519_key"
+        key="$PROOT/by-mac/$mac/etc/ssh/netboot_host_keys/ssh_host_ed25519_key"
         if [ -s "$key" ]; then
           echo "  ssh host key: $key  (present)"
         else
@@ -678,17 +678,21 @@ fi
 mkdir -p "$PROOT/by-mac"
 grep -v '^#' "$ART/persistent-dirs" | awk 'NF' | while read -r mac name; do
   anchor="$PROOT/by-mac/$mac"
-  mkdir -p "$anchor/.ssh-host-keys"
+  # The anchor SHADOWS THE ROOTFS LAYOUT where possible (sysadmin
+  # convention: one layout to learn): ssh host keys live at the same
+  # path they will occupy on the node, /etc/ssh/netboot_host_keys.
+  mkdir -p "$anchor/etc/ssh/netboot_host_keys"
   ln -sfn "by-mac/$mac" "$PROOT/$name"
   # Per-node ssh host key: the netboot image presents it once /persistent
   # is mounted (bind-mounted over the baked-in key by
   # nixos-persistent-keys). Generated ONCE at anchor creation; re-runs
   # keep the existing key so node identity never churns.
-  if [ ! -s "$anchor/.ssh-host-keys/ssh_host_ed25519_key" ]; then
+  key="$anchor/etc/ssh/netboot_host_keys/ssh_host_ed25519_key"
+  if [ ! -s "$key" ]; then
     ssh-keygen -t ed25519 -N "" \
       -C "netboot persistent host key $name ($mac)" \
-      -f "$anchor/.ssh-host-keys/ssh_host_ed25519_key" >/dev/null
-    chmod 600 "$anchor/.ssh-host-keys/ssh_host_ed25519_key"
+      -f "$key" >/dev/null
+    chmod 600 "$key"
     echo "persistent: generated host key for $name"
   fi
 done
