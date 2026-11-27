@@ -189,6 +189,14 @@ in
   # entirely: the cmdline owns the name (verified on the first boot).
   networking.networkmanager.settings.main.hostname-mode = "none";
 
+  # Bound NetworkManager-wait-online: it waits for EVERY managed
+  # interface to reach "connected" with no default limit, and a netboot
+  # node can have several interfaces (a multi-homed node stretched it to
+  # ~30s in the boot path -- the persistent NFS mount is ordered after
+  # network-online.target). A bounded wait keeps the ordering benefit
+  # without the tail latency.
+  systemd.services.NetworkManager-wait-online.serviceConfig.TimeoutStartSec = "15s";
+
   # Admin access is key-only, via the cluster-declared public keys.
   users.users.root.openssh.authorizedKeys.keys = sshAuthorizedKeys;
 
