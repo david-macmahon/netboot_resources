@@ -407,6 +407,7 @@ let
   nixosPaths = ''
     # tftp-dir: ${cluster.nixos.tftpDir}
     # http-dir: ${cluster.nixos.httpDir}
+    # payload-dir: ${cluster.nixos.payloadDir}
   '';
 
   # ---- artifacts ---------------------------------------------------------------

@@ -138,7 +138,7 @@ fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-CHANGED=0
+DNS_CHANGED=0
 
 # ---- run a command as the nix user -----------------------------------------
 # Builds and evaluation write to /nix/store, which in a single-user install
@@ -333,11 +333,13 @@ PROOT=$(sed -n 's/^# persistent-root: //p' "$ART/persistent-dirs" | head -1)
 # profile): parsed from the nixos-paths manifest, persistent-dirs style.
 TFTPDIR=""
 HTTPDIR=""
+PAYLOADDIR=""
 if [ -r "$ART/nixos-paths" ]; then
   TFTPDIR=$(sed -n 's/^# tftp-dir: //p' "$ART/nixos-paths" | head -1)
   HTTPDIR=$(sed -n 's/^# http-dir: //p' "$ART/nixos-paths" | head -1)
-  [ -n "$TFTPDIR" ] && [ -n "$HTTPDIR" ] || {
-    die "nixos-paths manifest is missing tftp-dir or http-dir"
+  PAYLOADDIR=$(sed -n 's/^# payload-dir: //p' "$ART/nixos-paths" | head -1)
+  [ -n "$TFTPDIR" ] && [ -n "$HTTPDIR" ] && [ -n "$PAYLOADDIR" ] || {
+    die "nixos-paths manifest is missing tftp-dir, http-dir or payload-dir"
   }
 fi
 
@@ -437,10 +439,11 @@ if [ "$MODE" = diff ]; then
     fi
     if [ -e "$ART/ipxe.lkrn" ]; then
       dst="$TFTPDIR/ipxe.lkrn"
+      # -L: the artifact is a SYMLINK (linkFarm); stat it through.
       if [ -f "$dst" ] && cmp -s "$dst" "$ART/ipxe.lkrn"; then
-        echo "=== $dst (unchanged, $(stat -c%s "$ART/ipxe.lkrn") bytes) ==="
+        echo "=== $dst (unchanged, $(stat -Lc%s "$ART/ipxe.lkrn") bytes) ==="
       else
-        echo "=== $dst (NEW or changed; $(stat -c%s "$ART/ipxe.lkrn") bytes) ==="
+        echo "=== $dst (NEW or changed; $(stat -Lc%s "$ART/ipxe.lkrn") bytes) ==="
       fi
     fi
     # Per-node hexip SYMLINKS (hexip -> shared menu), manifest-driven.
@@ -456,14 +459,28 @@ if [ "$MODE" = diff ]; then
           done
     fi
     echo "=== HTTP tree under $HTTPDIR ==="
-    for f in $(cd "$ART" && find nixos-netboot -type f -name '*.ipxe'); do
-      dst="$HTTPDIR/$f"
+    # Artifact entries are SYMLINKS (linkFarm): match -type f -o -type l,
+    # and strip the nixos-netboot/ prefix -- the artifact tree's
+    # nixos-netboot/ CONTENTS map onto the HTTP dir root.
+    for f in $(cd "$ART" && find nixos-netboot \( -type f -o -type l \) -name '*.ipxe'); do
+      dst="$HTTPDIR/${f#nixos-netboot/}"
       if [ -f "$dst" ] && ! [ -L "$dst" ]; then
         echo "=== $dst (proposed change) ==="
         diff -u "$dst" "$ART/$f" || true
       else
         echo "=== $dst (NEW file) ==="
         sed 's/^/  + /' "$ART/$f"
+      fi
+    done
+    # Image payload symlinks (the image build maintains PAYLOADDIR).
+    for f in bzImage initrd netboot.ipxe; do
+      if [ -L "$HTTPDIR/$f" ] && [ "$(readlink "$HTTPDIR/$f")" = "$PAYLOADDIR/$f" ]; then
+        echo "  ln -sfn $PAYLOADDIR/$f $f  (already in place)"
+      elif [ -e "$HTTPDIR/$f" ]; then
+        echo "  ln -sfn $PAYLOADDIR/$f $f  (REPLACES existing non-registry content)"
+      else
+        [ -e "$PAYLOADDIR/$f" ] || echo "  WARNING: payload missing: $PAYLOADDIR/$f (apply will REFUSE; build the image first)"
+        echo "  ln -sfn $PAYLOADDIR/$f $f  (NEW)"
       fi
     done
     # Withdrawal previews: registry-generated content (by marker, or by
@@ -504,12 +521,33 @@ if [ "$MODE" = diff ]; then
     done < <(find "$HTTPDIR" -type f -name '*.ipxe' -print0 2>/dev/null)
   fi
   echo "=== dnsmasq action ==="
-  if [ ! -f /etc/dnsmasq.d/netboot-registry.conf ]; then
-    echo "  RESTART dnsmasq (first-time install of netboot-registry.conf)"
-  elif ! cmp -s /etc/dnsmasq.d/netboot-registry.conf "$ART/dnsmasq-registry.conf"; then
-    echo "  RESTART dnsmasq (netboot-registry.conf CONTENT changed; config is not re-read on SIGHUP)"
+  # dnsmasq re-reads on SIGHUP exactly: the hosts block, /etc/ethers
+  # (read-ethers), and the dhcp-hostsfile (dnsmasq(8): dhcp-host
+  # data "can be changed without re-starting dnsmasq ... re-read when
+  # dnsmasq receives SIGHUP"). netboot-registry.conf is NOT reloadable
+  # (config is parsed only at startup). PXE/persistent/exports changes
+  # below never touch dnsmasq and must not trigger a reload.
+  DCONF_CHANGED=0
+  DDATA_CHANGED=0
+  if [ ! -f /etc/dnsmasq.d/netboot-registry.conf ] \
+     || ! cmp -s /etc/dnsmasq.d/netboot-registry.conf "$ART/dnsmasq-registry.conf"; then
+    DCONF_CHANGED=1
+  fi
+  cmp -s /etc/hosts "$TMP/hosts.new" || DDATA_CHANGED=1
+  if [ -f /etc/ethers ] && ! cmp -s /etc/ethers "$TMP/ethers.new"; then
+    DDATA_CHANGED=1
+  fi
+  if [ -f /etc/netboot-registry/dhcp-hosts ]; then
+    cmp -s /etc/netboot-registry/dhcp-hosts "$ART/dnsmasq-registry.dhcp-hosts" || DDATA_CHANGED=1
   else
-    echo "  HUP dnsmasq (if any file above changed)"
+    DDATA_CHANGED=1 # first-time install
+  fi
+  if [ "$DCONF_CHANGED" = 1 ]; then
+    echo "  RESTART dnsmasq (netboot-registry.conf new or changed; config is not re-read on SIGHUP)"
+  elif [ "$DDATA_CHANGED" = 1 ]; then
+    echo "  HUP dnsmasq (hosts block, ethers, or dhcp-hosts changed -- all SIGHUP-reloadable)"
+  else
+    echo "  none (no dnsmasq-read data changed)"
   fi
   exit 0
 fi
@@ -519,14 +557,14 @@ fi
 if ! cmp -s /etc/hosts "$TMP/hosts.new"; then
   cp --preserve=mode,ownership /etc/hosts "$TMP/hosts.bak"
   cat "$TMP/hosts.new" > /etc/hosts
-  CHANGED=1
+  DNS_CHANGED=1
   echo "hosts: updated"
 fi
 
 if [ -f /etc/ethers ] && ! cmp -s /etc/ethers "$TMP/ethers.new"; then
   cp --preserve=mode,ownership /etc/ethers "$TMP/ethers.bak"
   cat "$TMP/ethers.new" > /etc/ethers
-  CHANGED=1
+  DNS_CHANGED=1
   echo "ethers: updated"
 fi
 
@@ -534,13 +572,11 @@ EXPORTS_CHANGED=0
 if [ ! -f /etc/exports ]; then
   cat "$TMP/exports.new" > /etc/exports
   EXPORTS_CHANGED=1
-  CHANGED=1
   echo "exports: created"
 elif ! cmp -s /etc/exports "$TMP/exports.new"; then
   cp --preserve=mode,ownership /etc/exports "$TMP/exports.bak"
   cat "$TMP/exports.new" > /etc/exports
   EXPORTS_CHANGED=1
-  CHANGED=1
   echo "exports: updated"
 fi
 
@@ -569,12 +605,21 @@ for f in /etc/dnsmasq.d/registry.hosts /etc/dnsmasq.d/registry.dhcp-hosts \
 done
 
 install -m 644 "$ART/dnsmasq-registry.conf"       /etc/dnsmasq.d/netboot-registry.conf
-install -m 644 "$ART/dnsmasq-registry.dhcp-hosts" /etc/netboot-registry/dhcp-hosts
+# dhcp-hosts is SIGHUP-reloadable: track whether it actually changed so
+# the HUP at the end is honest (an exports-only or PXE-only run must
+# NOT bounce dnsmasq).
+if ! cmp -s /etc/netboot-registry/dhcp-hosts "$ART/dnsmasq-registry.dhcp-hosts"; then
+  install -m 644 "$ART/dnsmasq-registry.dhcp-hosts" /etc/netboot-registry/dhcp-hosts
+  DNS_CHANGED=1
+  echo "dnsmasq: dhcp-hosts updated"
+else
+  echo "dnsmasq: dhcp-hosts unchanged"
+fi
+echo "dnsmasq: netboot-registry.conf -> /etc/dnsmasq.d"
 # Migration: remove files from superseded layouts (including the old
 # config pointer name).
 rm -f /etc/dnsmasq.d/registry.hosts /etc/dnsmasq.d/registry.dhcp-hosts \
       /etc/dnsmasq.d/registry.conf /etc/netboot-registry/hosts
-echo "dnsmasq: netboot-registry.conf -> /etc/dnsmasq.d; dhcp-hosts -> /etc/netboot-registry/"
 
 # Preflight: never bounce dnsmasq (cluster DHCP+DNS) on a config that
 # fails its own syntax check.  On failure, revert everything this run
@@ -671,15 +716,18 @@ if [ -n "$TFTPDIR" ]; then
   mkdir -p "$TFTPDIR/pxelinux.cfg" "$HTTPDIR/by-mac"
   # Image payloads served next to the scripts: the scripts' `chain
   # netboot.ipxe` is relative and resolves here. The image build
-  # maintains /home/nix/build/result; these symlinks follow it.
+  # maintains the payload dir (nixos-paths manifest); these symlinks
+  # follow its result symlink.
   for f in bzImage initrd netboot.ipxe; do
-    [ -e "/home/nix/build/result/$f" ] \
-      || die "image payload missing: /home/nix/build/result/$f (build the image first)"
-    ln -sfn "/home/nix/build/result/$f" "$HTTPDIR/$f"
+    [ -e "$PAYLOADDIR/$f" ] \
+      || die "image payload missing: $PAYLOADDIR/$f (build the image first)"
+    ln -sfn "$PAYLOADDIR/$f" "$HTTPDIR/$f"
   done
   # Shared menus (marker-carrying regular files; install unlinks first).
+  # Artifact entries are SYMLINKS (linkFarm): match -type f -o -type l;
+  # install copies the symlink's target content.
   if [ -d "$ART/pxelinux.cfg" ]; then
-    find "$ART/pxelinux.cfg" -maxdepth 1 -type f \
+    find "$ART/pxelinux.cfg" -maxdepth 1 \( -type f -o -type l \) \
       -exec install -m 644 {} "$TFTPDIR/pxelinux.cfg/" \;
   fi
   # Per-node hexip SYMLINKS, manifest-driven. -f replaces anything in the
@@ -697,9 +745,9 @@ if [ -n "$TFTPDIR" ]; then
   if [ -f "$ART/nixos-netboot/dispatch.ipxe" ]; then
     install -m 644 "$ART/nixos-netboot/dispatch.ipxe" "$HTTPDIR/dispatch.ipxe"
   fi
-  find "$ART/nixos-netboot/by-mac" -maxdepth 1 -type f -name '*.ipxe' \
+  find "$ART/nixos-netboot/by-mac" -maxdepth 1 \( -type f -o -type l \) -name '*.ipxe' \
     -exec install -m 644 {} "$HTTPDIR/by-mac/" \;
-  echo "pxe: $(find "$ART/pxelinux.cfg" -maxdepth 1 -type f 2>/dev/null | wc -l) shared menu(s), $(grep -cv '^#\|^$' "$ART/pxe-symlinks" 2>/dev/null || echo 0) hexip link(s), $(find "$ART/nixos-netboot/by-mac" -maxdepth 1 -type f 2>/dev/null | wc -l) ipxe script(s)"
+  echo "pxe: $(find "$ART/pxelinux.cfg" -maxdepth 1 \( -type f -o -type l \) 2>/dev/null | wc -l) shared menu(s), $(grep -cv '^#\|^$' "$ART/pxe-symlinks" 2>/dev/null || echo 0) hexip link(s), $(find "$ART/nixos-netboot/by-mac" -maxdepth 1 \( -type f -o -type l \) -name '*.ipxe' 2>/dev/null | wc -l) ipxe script(s)"
   # Withdrawals.
   while IFS= read -r -d '' link; do
     target=$(readlink "$link") || continue
@@ -739,9 +787,9 @@ fi
 if [ "${RESTART:-0}" = 1 ]; then
   echo "dnsmasq: restarting ($RESTART_WHY)"
   systemctl restart dnsmasq
-elif [ "$CHANGED" = 1 ]; then
-  echo "dnsmasq: sending SIGHUP"
+elif [ "${DNS_CHANGED:-0}" = 1 ]; then
+  echo "dnsmasq: sending SIGHUP (hosts block, ethers, or dhcp-hosts changed; all SIGHUP-reloadable)"
   pkill -HUP dnsmasq
 else
-  echo "dnsmasq: no changes, no reload"
+  echo "dnsmasq: no dnsmasq-read data changed, no reload"
 fi
