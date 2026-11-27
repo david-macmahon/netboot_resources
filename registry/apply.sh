@@ -100,8 +100,8 @@ provably matches the current registry sources.
   --build           build as user 'nix' and re-point ./result as needed
                     (this is the fix for: missing or stale result)
   --cluster-repo    cluster repo containing registry.nix and ./result
-                    (default: ./bl_netboot, relative to the invoking
-                    directory; override with NIX_NETBOOT_CLUSTER_REPO)
+                    (default: . -- the invoking directory must be the
+                    cluster repo; override with NIX_NETBOOT_CLUSTER_REPO)
 
 result states: missing/stale/older-generation -> rerun with --build;
 dangling/foreign -> refused (fix by hand: rm the symlink if intentional).
@@ -112,11 +112,10 @@ EOF
 
 MODE=apply
 DO_BUILD=0
-# Transitional default (machinery is imported by absolute path in the
-# cluster repo's registry.nix). Relative to the invoking directory;
-# override with --cluster-repo or NIX_NETBOOT_CLUSTER_REPO. This
-# disappears at flake-ification.
-CLUSTER_REPO="${NIX_NETBOOT_CLUSTER_REPO:-./bl_netboot}"
+# Transitional default: the invoking directory IS the cluster repo
+# (registry.nix and ./result live there). Override with --cluster-repo
+# or NIX_NETBOOT_CLUSTER_REPO. This disappears at flake-ification.
+CLUSTER_REPO="${NIX_NETBOOT_CLUSTER_REPO:-.}"
 
 while [ $# -gt 0 ]; do
   case $1 in
