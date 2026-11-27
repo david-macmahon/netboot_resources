@@ -272,16 +272,17 @@ let
       # iPXE client identification: iPXE sends option 175 (its extensions
       # option -- a BIOS PXE ROM never does), so dhcp-match can tag it for
       # the SECOND DHCP request of a boot (the one iPXE itself makes).
-      # NOTE (first-boot lesson from blh3): this dhcp-boot rule does NOT
-      # currently take effect for the lkrn autoboot path, because the
-      # house config (/etc/dnsmasq.conf) sets tag "pxe" on EVERY
-      # PXEClient vendorclass -- iPXE included -- and its
-      # "dhcp-boot=tag:pxe,pxe/pxelinux.0" shadows this one. The
-      # unattended boot therefore does NOT rely on autoboot: the nixos
-      # menu's cmdline does "dhcp && chain <dispatch URL>" itself. These
-      # rules stay correct and dormant -- they become load-bearing for
-      # undionly/UEFI boot stages, and the house rule will need its
-      # documented "!gpxe"-style negation ("tag:!ipxe") when that happens.
+      # NOTE (verified on a first boot): this dhcp-boot rule can be
+      # SHADOWED on sites whose DHCP configuration tags every PXEClient
+      # vendorclass (iPXE identifies as a PXEClient too) and assigns the
+      # bootfile through that tag -- such a rule wins regardless of this
+      # file's later position. The unattended boot therefore does NOT
+      # rely on autoboot: the nixos menu's cmdline does
+      # "dhcp && chain <dispatch URL>" itself. These rules stay correct
+      # and dormant -- they become load-bearing for undionly/UEFI boot
+      # stages, at which point a shadowing site needs a negated-tag
+      # bootfile rule ("tag:!ipxe"; the shipped dnsmasq.conf documents
+      # the pattern as "tag:!gpxe,undionly.kpxe").
       dhcp-match=set:ipxe,175
       dhcp-boot=net:ipxe,${cluster.nixos.httpBaseUrl}/dispatch.ipxe
     ''}
@@ -342,8 +343,8 @@ let
           MENU LABEL NixOS (netboot)
           KERNEL ipxe.lkrn
           # The lkrn cmdline IS an iPXE script (one command line). DHCP
-          # must happen BEFORE any fetch, and && sequences on success:
-          # first-boot lesson from blh3 -- a bare "chain http://..." fails
+          # must happen BEFORE any fetch, and && sequences on success
+          # (learned on the first boot): a bare "chain http://..." fails
           # with Network unreachable (no IP yet), and the failure path is
           # a silent exit to the BIOS (looks like a hang, then falls
           # through to the next boot device).

@@ -126,18 +126,20 @@ in
   # static hostname ("nixos", written to /etc/hostname) gets re-applied
   # later (NetworkManager / hostnamed) and overrides it -- so write NO
   # static hostname: NixOS skips /etc/hostname entirely when hostName is
-  # empty. (First-boot lesson from blh3: PID 1 set blh3 from the cmdline,
-  # the NFS mount expanded %H correctly -- and the hostname still ended
-  # up "nixos" by the time getty started.)
+  # empty. (First-boot lesson: PID 1 set the cmdline hostname correctly
+  # -- the NFS mount expanded %H right -- but the static hostname was
+  # re-applied later (NetworkManager / hostnamed), so getty came up
+  # under the default name.)
   networking.hostName = lib.mkForce "";
 
   # Persist the cmdline hostname to /etc/hostname BEFORE networking.
   # systemd applies systemd.hostname= at boot, but with no static
   # /etc/hostname NetworkManager invents "dhcp-<lease-ip>" for nodes
   # whose leases carry no hostname option -- and a netboot node can
-  # lease on MORE than one subnet (blh3's second NIC found a foreign
-  # DHCP server). Writing the file early pins the cmdline name as the
-  # static one; NM then preserves it. Generic mode (no systemd.hostname=)
+  # lease on MORE than one subnet (a node's second NIC can find a
+  # foreign DHCP server). Writing the file early pins the cmdline name
+  # as the static one; NM then preserves it. Generic mode (no
+  # systemd.hostname=)
   # writes nothing, leaving NM's dhcp-<ip> self-naming in place -- the
   # parked design for unregistered triage nodes.
   systemd.services.nixos-hostname = {
@@ -199,7 +201,7 @@ in
       # mountpoint(1) and mount(8) come from util-linux, which is NOT in
       # the unit's default PATH -- without this the check fails with
       # "command not found" and the unit no-ops ("not mounted") even
-      # when /persistent is mounted (first-boot lesson from blh3).
+      # when /persistent is mounted (verified on the first boot).
       path = [ pkgs.util-linux ];
       script = ''
         keydir="/persistent/etc/ssh/netboot_host_keys"
