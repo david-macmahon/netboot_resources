@@ -107,8 +107,11 @@ in
   # keys whenever the anchor actually appears. The
   # two-key design already defines "baked key = not fully booted", so a
   # longer baked-key window is the signal working, not a regression.
-  # systemd adds the network-online ordering for network filesystems
-  # automatically, same as a fstab entry would get.
+  # The mount is explicitly ordered after network-online.target below --
+  # despite the folklore, systemd does NOT add that ordering for
+  # network filesystems on its own (the realized unit carried no such
+  # dependency, which is how a mount attempt once fired into a dark
+  # network and burned its whole start timeout).
   systemd.mounts = lib.mkIf (persistentDevice != null) [
     {
       what = "${persistentDevice}/%H";
@@ -116,10 +119,17 @@ in
       type = "nfs";
       options = "rw,noatime";
       # NOT wanted by remote-fs.target (that would mount it at boot);
-      # the automount unit below is the boot-chain representative. When
-      # the mount DOES complete, it pulls in the key-overlay service.
+      # the automount unit below is the boot-chain representative. Wait
+      # for a genuinely usable network before the one real mount
+      # attempt: pulled in and ordered after network-online.target (see
+      # the wait-online note above). The trigger (the overlay worker's
+      # stat) may fire long before that -- the MOUNT JOB waits, and
+      # nothing in the boot chain waits for the mount. When the mount
+      # DOES complete, it pulls in the key-overlay service.
       wantedBy = [ ];
-      wants = lib.mkIf (bakedHostKeys != [ ]) [ "nixos-persistent-keys.service" ];
+      wants = [ "network-online.target" ]
+        ++ lib.optionals (bakedHostKeys != [ ]) [ "nixos-persistent-keys.service" ];
+      after = [ "network-online.target" ];
     }
   ];
 
@@ -223,13 +233,19 @@ in
   # entirely: the cmdline owns the name (verified on the first boot).
   networking.networkmanager.settings.main.hostname-mode = "none";
 
-  # Bound NetworkManager-wait-online: it waits for EVERY managed
-  # interface to reach "connected" with no default limit, and a netboot
-  # node can have several interfaces (a multi-homed node stretched it to
-  # ~30s in the boot path -- the persistent NFS mount is ordered after
-  # network-online.target). A bounded wait keeps the ordering benefit
-  # without the tail latency.
-  systemd.services.NetworkManager-wait-online.serviceConfig.TimeoutStartSec = "15s";
+  # NetworkManager-wait-online with a generous bound. It waits for EVERY
+  # managed interface to reach "connected", which on a multi-homed node
+  # takes ~30s (foreign subnets, slow NICs). The boot itself never waits
+  # for it -- /persistent is an automount, so nothing in the boot chain
+  # consumes network-online.target -- but the persistent mount DOES: the
+  # overlay worker triggers it at boot+5s, and the mount job waits for
+  # network-online.target before mounting, so the one real mount attempt
+  # happens into a ready network instead of burning its whole start
+  # timeout against a dark one (that blind attempt is what made the
+  # boot-to-key-flip take ~2 minutes). The bound only caps pathological
+  # cases (an interface stuck acquiring DHCP forever); on healthy boots
+  # wait-online completes naturally first.
+  systemd.services.NetworkManager-wait-online.serviceConfig.TimeoutStartSec = "90s";
 
   # Admin access is key-only, via the cluster-declared public keys.
   users.users.root.openssh.authorizedKeys.keys = sshAuthorizedKeys;
