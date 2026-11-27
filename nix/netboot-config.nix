@@ -63,7 +63,7 @@
 #   the openssh module default applies (rsa + ed25519 generated at boot).
 { cluster ? null }:
 
-{ modulesPath, lib, ... }:
+{ modulesPath, lib, pkgs, ... }:
 
 let
   # Site features activate only when cluster data is provided.
@@ -153,6 +153,11 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       };
+      # mountpoint(1) and mount(8) come from util-linux, which is NOT in
+      # the unit's default PATH -- without this the check fails with
+      # "command not found" and the unit no-ops ("not mounted") even
+      # when /persistent is mounted (first-boot lesson from blh3).
+      path = [ pkgs.util-linux ];
       script = ''
         keydir="/persistent/etc/ssh/netboot_host_keys"
         if ! mountpoint -q /persistent; then
