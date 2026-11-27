@@ -100,11 +100,18 @@ let
       iip = if hasIpmi then trim (toString n.ipmi.ip) else "";
       nameOk = lib.strings.match "[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?" name != null;
       mid = n.machineId or null;
+      prof = n.imageProfile or null;
+      knownProfiles =
+        if cluster ? nixos then cluster.nixos.imageProfiles or null else null;
     in
     assert lib.assertMsg nameOk
       "registry: node name '${name}' is not a valid hostname";
     assert lib.assertMsg (mid == null || lib.strings.match "[0-9a-f]{32}" mid != null)
       "registry: node ${name}: machineId must be exactly 32 lowercase hex chars ('${toString mid}') -- the format machine-id(5) requires";
+    assert lib.assertMsg (prof == null || lib.strings.match "[A-Za-z0-9][A-Za-z0-9._-]*" prof != null)
+      "registry: node ${name}: malformed imageProfile name ('${toString prof}')";
+    assert lib.assertMsg (knownProfiles == null || prof == null || lib.elem prof knownProfiles)
+      "registry: node ${name}: imageProfile '${toString prof}' is not in cluster.nixos.imageProfiles (${toString knownProfiles})";
     assert lib.assertMsg (macOk mac)
       ("registry: node ${name}: missing or malformed primary MAC ('${mac}'). " +
         "DHCP, PXE and persistent storage all key on it; the registry never " +
@@ -400,6 +407,11 @@ let
   pxeIpxeFiles = map (name:
     let
       mid = checkedNodes.${name}.machineId or null;
+      # The chain URL carries the node's IMAGE PROFILE: the payload
+      # tree is per-profile (<httpBaseUrl>/<profile>/netboot.ipxe) so
+      # nodes with different driver/hardware profiles boot different
+      # images from the same registry.
+      prof = checkedNodes.${name}.imageProfile or "base";
     in
     { name = "nixos-netboot/by-mac/${normMac checkedNodes.${name}.mac}.ipxe";
       path = pkgs.writeText "nixos-netboot-by-mac-${normMac checkedNodes.${name}.mac}.ipxe" ''
@@ -424,7 +436,7 @@ let
         # ("invalid magic at start of compressed archive" panic); with
         # nokaslr the kernel decompresses to its fixed address and boots.
         set cmdline ${cluster.nixos.console} nokaslr systemd.hostname=${name}${lib.optionalString (mid != null) " systemd.machine_id=${mid}"}
-        chain ${cluster.nixos.httpBaseUrl}/netboot.ipxe
+        chain ${cluster.nixos.httpBaseUrl}/${prof}/netboot.ipxe
       '';
     }) pxeNodeNames;
 
@@ -446,10 +458,17 @@ let
 
   # Head-node layout facts the apply script needs (where the TFTP/HTTP
   # trees live). Parsed from the header lines, persistent-dirs style.
+  # image-profiles lists the image profiles the pxe nodes actually use:
+  # the image build produces one payload subdirectory per profile and
+  # the apply script materializes one HTTP payload tree per profile.
+  usedImageProfiles =
+    lib.unique
+      (map (name: checkedNodes.${name}.imageProfile or "base") pxeNodeNames);
   nixosPaths = ''
     # tftp-dir: ${cluster.nixos.tftpDir}
     # http-dir: ${cluster.nixos.httpDir}
     # payload-dir: ${cluster.nixos.payloadDir}
+    # image-profiles: ${lib.concatStringsSep " " usedImageProfiles}
   '';
 
   # Machine-id manifest: "<primary-mac> <machine-id>" for nodes that

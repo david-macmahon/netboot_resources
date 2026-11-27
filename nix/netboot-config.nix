@@ -61,7 +61,7 @@
 # layout, not two.
 #   hostKeys is set ONLY in site builds (lib.mkIf): in generic builds
 #   the openssh module default applies (rsa + ed25519 generated at boot).
-{ cluster ? null }:
+{ cluster ? null, profileConfig ? null }:
 
 { modulesPath, lib, pkgs, ... }:
 
@@ -87,7 +87,7 @@ in
   imports = [
     "${modulesPath}/installer/netboot/netboot-minimal.nix"
     ./udev-nixos-patched.nix
-  ];
+  ] ++ lib.optionals (profileConfig != null) [ profileConfig ];
 
   disabledModules = [ "services/hardware/udev.nix" ];
 

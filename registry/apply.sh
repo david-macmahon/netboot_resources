@@ -334,12 +334,14 @@ PROOT=$(sed -n 's/^# persistent-root: //p' "$ART/persistent-dirs" | head -1)
 TFTPDIR=""
 HTTPDIR=""
 PAYLOADDIR=""
+IMAGEPROFILES=""
 if [ -r "$ART/nixos-paths" ]; then
   TFTPDIR=$(sed -n 's/^# tftp-dir: //p' "$ART/nixos-paths" | head -1)
   HTTPDIR=$(sed -n 's/^# http-dir: //p' "$ART/nixos-paths" | head -1)
   PAYLOADDIR=$(sed -n 's/^# payload-dir: //p' "$ART/nixos-paths" | head -1)
-  [ -n "$TFTPDIR" ] && [ -n "$HTTPDIR" ] && [ -n "$PAYLOADDIR" ] || {
-    die "nixos-paths manifest is missing tftp-dir, http-dir or payload-dir"
+  IMAGEPROFILES=$(sed -n 's/^# image-profiles: //p' "$ART/nixos-paths" | head -1)
+  [ -n "$TFTPDIR" ] && [ -n "$HTTPDIR" ] && [ -n "$PAYLOADDIR" ] && [ -n "$IMAGEPROFILES" ] || {
+    die "nixos-paths manifest is missing tftp-dir, http-dir, payload-dir or image-profiles"
   }
 fi
 
@@ -490,17 +492,20 @@ if [ "$MODE" = diff ]; then
         sed 's/^/  + /' "$ART/$f"
       fi
     done
-    # Image payload symlinks (the image build maintains PAYLOADDIR).
+    # Image payload symlinks: one HTTP payload tree per image profile
+    # (the image build maintains <PAYLOADDIR>/<profile>/).
     echo "=== image payload symlinks (payload dir -> HTTP dir) ==="
-    for f in bzImage initrd netboot.ipxe; do
-      if [ -L "$HTTPDIR/$f" ] && [ "$(readlink "$HTTPDIR/$f")" = "$PAYLOADDIR/$f" ]; then
-        echo "  ln -sfn $PAYLOADDIR/$f $f  (already in place)"
-      elif [ -e "$HTTPDIR/$f" ]; then
-        echo "  ln -sfn $PAYLOADDIR/$f $f  (REPLACES existing non-registry content)"
-      else
-        [ -e "$PAYLOADDIR/$f" ] || echo "  WARNING: payload missing: $PAYLOADDIR/$f (apply will REFUSE; build the image first)"
-        echo "  ln -sfn $PAYLOADDIR/$f $f  (NEW)"
-      fi
+    for p in $IMAGEPROFILES; do
+      for f in bzImage initrd netboot.ipxe; do
+        if [ -L "$HTTPDIR/$p/$f" ] && [ "$(readlink "$HTTPDIR/$p/$f")" = "$PAYLOADDIR/$p/$f" ]; then
+          echo "  ln -sfn $PAYLOADDIR/$p/$f $p/$f  (already in place)"
+        elif [ -e "$HTTPDIR/$p/$f" ]; then
+          echo "  ln -sfn $PAYLOADDIR/$p/$f $p/$f  (REPLACES existing non-registry content)"
+        else
+          [ -e "$PAYLOADDIR/$p/$f" ] || echo "  WARNING: payload missing: $PAYLOADDIR/$p/$f (apply will REFUSE; build the image first)"
+          echo "  ln -sfn $PAYLOADDIR/$p/$f $p/$f  (NEW)"
+        fi
+      done
     done
     # Withdrawal previews: registry-generated content (by marker, or by
     # symlink target) in the live trees that the current artifact set
@@ -763,14 +768,17 @@ fi
 # files and symlinks are left alone.
 if [ -n "$TFTPDIR" ]; then
   mkdir -p "$TFTPDIR/pxelinux.cfg" "$HTTPDIR/by-mac"
-  # Image payloads served next to the scripts: the scripts' `chain
-  # netboot.ipxe` is relative and resolves here. The image build
-  # maintains the payload dir (nixos-paths manifest); these symlinks
+  # Image payloads served per image profile: the scripts' `chain
+  # <profile>/netboot.ipxe` resolves here. The image build maintains
+  # <PAYLOADDIR>/<profile>/ (nixos-paths manifest); these symlinks
   # follow its result symlink.
-  for f in bzImage initrd netboot.ipxe; do
-    [ -e "$PAYLOADDIR/$f" ] \
-      || die "image payload missing: $PAYLOADDIR/$f (build the image first)"
-    ln -sfn "$PAYLOADDIR/$f" "$HTTPDIR/$f"
+  for p in $IMAGEPROFILES; do
+    for f in bzImage initrd netboot.ipxe; do
+      [ -e "$PAYLOADDIR/$p/$f" ] \
+        || die "image payload missing: $PAYLOADDIR/$p/$f (build the image first)"
+      mkdir -p "$HTTPDIR/$p"
+      ln -sfn "$PAYLOADDIR/$p/$f" "$HTTPDIR/$p/$f"
+    done
   done
   # Shared menus (marker-carrying regular files; install unlinks first).
   # Artifact entries are SYMLINKS (linkFarm): match -type f -o -type l;

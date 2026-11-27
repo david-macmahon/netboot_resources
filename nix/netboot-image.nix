@@ -22,10 +22,15 @@
 # mount, ssh host keys served from the persistent tree, and the
 # cluster-declared admin ssh keys. Without it, the build is the generic
 # (site-less) image.
-{ cluster ? null }:
+#
+# `profileConfig` carries the image profile's NixOS configuration module
+# (see nix/image-profiles.nix): hardware/driver variety that genuinely
+# needs different packages in the image. Per-node variation that needs
+# no different packages belongs in the persistent tree, not here.
+{ cluster ? null, profileConfig ? null }:
 let
   nixos = import <nixpkgs/nixos> {
-    configuration = import ./netboot-config.nix { inherit cluster; };
+    configuration = import ./netboot-config.nix { inherit cluster profileConfig; };
   };
   cfg = nixos.config;
 in
