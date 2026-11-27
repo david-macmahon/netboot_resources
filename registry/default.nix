@@ -99,9 +99,12 @@ let
       imac = if hasIpmi then normMac n.ipmi.mac else "";
       iip = if hasIpmi then trim (toString n.ipmi.ip) else "";
       nameOk = lib.strings.match "[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?" name != null;
+      mid = n.machineId or null;
     in
     assert lib.assertMsg nameOk
       "registry: node name '${name}' is not a valid hostname";
+    assert lib.assertMsg (mid == null || lib.strings.match "[0-9a-f]{32}" mid != null)
+      "registry: node ${name}: machineId must be exactly 32 lowercase hex chars ('${toString mid}') -- the format machine-id(5) requires";
     assert lib.assertMsg (macOk mac)
       ("registry: node ${name}: missing or malformed primary MAC ('${mac}'). " +
         "DHCP, PXE and persistent storage all key on it; the registry never " +
@@ -395,6 +398,9 @@ let
   # OWN directory (by-mac/), not the HTTP root -- first-boot lesson
   # (Not found at by-mac/netboot.ipxe).
   pxeIpxeFiles = map (name:
+    let
+      mid = checkedNodes.${name}.machineId or null;
+    in
     { name = "nixos-netboot/by-mac/${normMac checkedNodes.${name}.mac}.ipxe";
       path = pkgs.writeText "nixos-netboot-by-mac-${normMac checkedNodes.${name}.mac}.ipxe" ''
         #!ipxe
@@ -406,11 +412,18 @@ let
         # the image's %H mount unit expand to this node's anchor path.
         # It also puts the right name in the DHCP request, so dnsmasq
         # registers it in DNS.
+        # systemd.machine_id= (when the node declares one) gives PID 1
+        # a stable machine identity from the first instruction:
+        # journald and any machine-id consumer see the same value every
+        # boot, with no NFS dependency. The apply script records the
+        # same value in the node's anchor as /persistent/etc/machine-id,
+        # where the image's overlay worker bind-mounts it over
+        # /etc/machine-id once /persistent is up.
         # nokaslr: KASLR's randomized decompression target clobbered the
         # ~500MB initrd in memory under BIOS+iPXE on the first boot
         # ("invalid magic at start of compressed archive" panic); with
         # nokaslr the kernel decompresses to its fixed address and boots.
-        set cmdline ${cluster.nixos.console} nokaslr systemd.hostname=${name}
+        set cmdline ${cluster.nixos.console} nokaslr systemd.hostname=${name}${lib.optionalString (mid != null) " systemd.machine_id=${mid}"}
         chain ${cluster.nixos.httpBaseUrl}/netboot.ipxe
       '';
     }) pxeNodeNames;
@@ -439,6 +452,19 @@ let
     # payload-dir: ${cluster.nixos.payloadDir}
   '';
 
+  # Machine-id manifest: "<primary-mac> <machine-id>" for nodes that
+  # DECLARE a stable machine identity. The per-node iPXE script renders
+  # it onto the cmdline (systemd.machine_id=, honored by PID 1 from the
+  # first instruction); the apply script records the same value in the
+  # node's anchor as /persistent/etc/machine-id, where the image's
+  # overlay worker bind-mounts it over /etc/machine-id once /persistent
+  # is up. Absent = no cmdline parameter and no anchor record.
+  machineIdsManifest = ''
+    # machine-id: <primary-mac> <machine-id>
+  '' + lib.concatStringsSep "\n"
+    (map (name: "${normMac checkedNodes.${name}.mac} ${checkedNodes.${name}.machineId}")
+      (lib.filter (name: checkedNodes.${name}.machineId or null != null) nodeNames));
+
   # ---- artifacts ---------------------------------------------------------------
 
   artifacts = pkgs.linkFarm "registry-artifacts" (
@@ -449,6 +475,7 @@ let
       { name = "exports.managed"; path = pkgs.writeText "exports.managed" exportsManaged; }
 
       { name = "persistent-dirs"; path = pkgs.writeText "persistent-dirs" persistentManifest; }
+      { name = "machine-ids"; path = pkgs.writeText "machine-ids" machineIdsManifest; }
     ]
     ++ lib.optionals (cluster ? nixos) [
       { name = "nixos-paths"; path = pkgs.writeText "nixos-paths" nixosPaths; }

@@ -280,6 +280,18 @@ in
           # This stat is the automount trigger point: it starts the
           # real NFS mount and blocks until it succeeds or fails.
           if [ -d "${keydir}" ]; then
+            # Persistent machine-id record: bind it over
+            # /etc/machine-id so post-mount consumers (and operators)
+            # see the stable identity on disk. PID 1 already holds the
+            # same value from the cmdline (systemd.machine_id=); this
+            # is the on-disk consistency step. Done FIRST so no
+            # key-related early exit below can skip it.
+            mid="/persistent/etc/machine-id"
+            if [ -s "$mid" ] && ! mountpoint -q /etc/machine-id; then
+              [ -e /etc/machine-id ] || : > /etc/machine-id
+              mount --bind "$mid" /etc/machine-id
+              echo "nixos-persistent-keys: persistent machine-id presented"
+            fi
         '' + lib.concatMapStrings (keyPath:
           let name = baseNameOf keyPath; in ''
             if [ ! -s "${keydir}/${name}" ]; then
