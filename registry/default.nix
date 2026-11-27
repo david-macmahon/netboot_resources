@@ -268,6 +268,18 @@ let
     # is fatal as config ("bad option" at startup). Only genuine config
     # directives belong in the dnsmasq config directory.
     dhcp-hostsfile=/etc/netboot-registry/dhcp-hosts
+    ${lib.optionalString (cluster ? nixos) ''
+      # iPXE two-stage boot: iPXE clients identify themselves with option
+      # 175 (the iPXE extensions option -- sent by iPXE, never by a BIOS
+      # PXE ROM), so the SECOND DHCP request of the boot (the one iPXE
+      # itself makes) gets the registry's MAC-keyed dispatch script over
+      # HTTP, while every BIOS ROM keeps the site's default pxelinux.0
+      # bootfile and the hand-era menus. This makes ipxe.lkrn's
+      # DHCP-autoboot do the right thing: autoboot re-asks DHCP, and this
+      # answer IS the next stage.
+      dhcp-match=set:ipxe,175
+      dhcp-boot=net:ipxe,${cluster.nixos.httpBaseUrl}/dispatch.ipxe
+    ''}
   '';
 
   # ---- persistent-storage manifest -----------------------------------------
@@ -366,9 +378,10 @@ let
 
   # Per-node iPXE scripts, MAC-keyed. The marker comment is AFTER the
   # #!ipxe magic line: iPXE detects scripts by the magic bytes at the
-  # START of the file. `chain netboot.ipxe` is relative and resolves
-  # against this script's own URL, so the image payloads must be served
-  # from the same HTTP directory.
+  # START of the file. The final `chain` uses the ABSOLUTE image URL:
+  # a relative `chain netboot.ipxe` would resolve against the script's
+  # OWN directory (by-mac/), not the HTTP root -- first-boot lesson
+  # (Not found at by-mac/netboot.ipxe).
   pxeIpxeFiles = map (name:
     { name = "nixos-netboot/by-mac/${normMac checkedNodes.${name}.mac}.ipxe";
       path = pkgs.writeText "nixos-netboot-by-mac-${normMac checkedNodes.${name}.mac}.ipxe" ''
@@ -382,7 +395,7 @@ let
         # It also puts the right name in the DHCP request, so dnsmasq
         # registers it in DNS.
         set cmdline ${cluster.nixos.console} systemd.hostname=${name}
-        chain netboot.ipxe
+        chain ${cluster.nixos.httpBaseUrl}/netboot.ipxe
       '';
     }) pxeNodeNames;
 
