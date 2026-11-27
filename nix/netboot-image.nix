@@ -16,9 +16,16 @@
 # Build from anywhere with:
 #   nix-build nix/netboot-image.nix
 # (a `result` symlink appears in the working directory).
+#
+# With a `cluster` argument (cluster data from the private repo), the
+# image gains the site's identity features: the persistent-storage NFS
+# mount, ssh host keys served from the persistent tree, and the
+# cluster-declared admin ssh keys. Without it, the build is the generic
+# (site-less) image.
+{ cluster ? null }:
 let
   nixos = import <nixpkgs/nixos> {
-    configuration = import ./netboot-config.nix;
+    configuration = import ./netboot-config.nix { inherit cluster; };
   };
   cfg = nixos.config;
 in
