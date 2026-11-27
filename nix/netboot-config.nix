@@ -121,6 +121,16 @@ in
     }) bakedHostKeys)
   );
 
+  # The hostname comes from the kernel cmdline (systemd.hostname=,
+  # rendered per node by the registry). The installer-profile default
+  # static hostname ("nixos", written to /etc/hostname) gets re-applied
+  # later (NetworkManager / hostnamed) and overrides it -- so write NO
+  # static hostname: NixOS skips /etc/hostname entirely when hostName is
+  # empty. (First-boot lesson from blh3: PID 1 set blh3 from the cmdline,
+  # the NFS mount expanded %H correctly -- and the hostname still ended
+  # up "nixos" by the time getty started.)
+  networking.hostName = lib.mkForce "";
+
   # sshd serves the baked keys until the overlay swaps in the persistent
   # ones. mkIf (not an empty list) so generic builds keep the module
   # default keys (rsa + ed25519, generated at boot).
