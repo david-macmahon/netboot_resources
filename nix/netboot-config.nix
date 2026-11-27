@@ -180,6 +180,15 @@ in
     );
   };
 
+  # NetworkManager must never touch the hostname: leases on ANY interface
+  # (a netboot node can see several subnets, and a foreign subnet's DHCP
+  # server may supply its own lease name and domain) would otherwise
+  # override the cmdline identity. hostnamed's static-hostname handling
+  # also proved unreliable in the netboot image (hostnamectl showed the
+  # static name as unset despite /etc/hostname), so NM is made hands-off
+  # entirely: the cmdline owns the name (verified on the first boot).
+  networking.networkmanager.settings.main.hostname-mode = "none";
+
   # Admin access is key-only, via the cluster-declared public keys.
   users.users.root.openssh.authorizedKeys.keys = sshAuthorizedKeys;
 
