@@ -102,8 +102,9 @@ in
   # carry traffic (e.g. switch spanning-tree delay before DHCP even
   # starts), so a boot-mounted NFS mount sat in the boot path behind
   # DHCP; with the automount the login prompt never waits for NFS, and
-  # the key-overlay service below -- pulled in by the mount itself --
-  # flips the ssh host keys whenever the anchor actually appears. The
+  # the key-overlay service (dispatched shortly after boot by the timer
+  # below, and also pulled in by the mount itself) flips the ssh host
+  # keys whenever the anchor actually appears. The
   # two-key design already defines "baked key = not fully booted", so a
   # longer baked-key window is the signal working, not a regression.
   # systemd adds the network-online ordering for network filesystems
@@ -240,8 +241,16 @@ in
   systemd.services.nixos-persistent-keys =
     lib.mkIf (bakedHostKeys != [ ]) {
       description = "Overlay persistent ssh host keys over the baked-in ones";
+      # NOT wanted by any boot target (a wanted unit's start job blocks
+      # its target, and this job may wait minutes for NFS): dispatched
+      # by the timer below. The timer firing is what makes the FIRST
+      # access to /persistent and thus triggers the automount --
+      # triggering the service only from the mount would be circular
+      # (the mount starts only on first access). After sshd so the
+      # reload below hits a running daemon; sshd starting later would
+      # read the persistent keys itself, so either order is correct.
       wantedBy = [ ];
-      after = [ "persistent.mount" ];
+      after = [ "persistent.mount" "sshd.service" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -283,4 +292,17 @@ in
         exit 1
       '';
     };
+
+  # The overlay worker's dispatch: fires once, 5s after boot. timers.
+  # target sits in the boot chain but its jobs block nothing -- the
+  # login prompt is unaffected no matter how long NFS takes. The
+  # timer's start of the worker is the first access under the
+  # automount, which starts the real NFS mount.
+  systemd.timers.nixos-persistent-keys = lib.mkIf (bakedHostKeys != [ ]) {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "5s";
+      Unit = "nixos-persistent-keys.service";
+    };
+  };
 }
