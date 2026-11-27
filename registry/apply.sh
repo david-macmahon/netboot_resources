@@ -68,7 +68,8 @@
 #                   by earlier layouts (registry.{hosts,dhcp-hosts} in
 #                   /etc/dnsmasq.d; hosts in /etc/netboot-registry).
 #   persistent dirs materialize <persistent-root>/by-mac/<mac> anchors and
-#                   <persistent-root>/<name> -> by-mac/<mac> symlinks.
+#                   <persistent-root>/<name> -> by-mac/<mac> symlinks, plus a
+#                   per-node ssh host key inside each anchor (generated once).
 #   dnsmasq         SIGHUP if only HUP-reloadable data changed; full
 #                   restart when netboot-registry.conf is newly installed
 #                   OR its content changed (config is not re-read on
@@ -623,10 +624,22 @@ fi
 
 mkdir -p "$PROOT/by-mac"
 grep -v '^#' "$ART/persistent-dirs" | awk 'NF' | while read -r mac name; do
-  mkdir -p "$PROOT/by-mac/$mac"
+  anchor="$PROOT/by-mac/$mac"
+  mkdir -p "$anchor/.ssh-host-keys"
   ln -sfn "by-mac/$mac" "$PROOT/$name"
+  # Per-node ssh host key: the netboot image presents it once /persistent
+  # is mounted (bind-mounted over the baked-in key by
+  # nixos-persistent-keys). Generated ONCE at anchor creation; re-runs
+  # keep the existing key so node identity never churns.
+  if [ ! -s "$anchor/.ssh-host-keys/ssh_host_ed25519_key" ]; then
+    ssh-keygen -t ed25519 -N "" \
+      -C "netboot persistent host key $name ($mac)" \
+      -f "$anchor/.ssh-host-keys/ssh_host_ed25519_key" >/dev/null
+    chmod 600 "$anchor/.ssh-host-keys/ssh_host_ed25519_key"
+    echo "persistent: generated host key for $name"
+  fi
 done
-echo "persistent: anchors + symlinks materialized under $PROOT"
+echo "persistent: anchors + host keys + symlinks materialized under $PROOT"
 
 # ---- apply the exports change ---------------------------------------------
 # exportfs -ra re-reads the table live; no daemon restart needed. On

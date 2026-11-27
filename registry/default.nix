@@ -376,7 +376,12 @@ let
         # ${pxeMarker} iPXE script -- GENERATED CONTENT, DO NOT EDIT.
         # Regenerate from the node registry (nodes/*.nix in the cluster
         # repo) and redeploy with the registry apply script.
-        set cmdline ${cluster.nixos.console} hostname=${name}
+        # systemd.hostname= (not bare hostname=) is honored by systemd
+        # PID 1 in EARLY boot -- before units load, which is what lets
+        # the image's %H mount unit expand to this node's anchor path.
+        # It also puts the right name in the DHCP request, so dnsmasq
+        # registers it in DNS.
+        set cmdline ${cluster.nixos.console} systemd.hostname=${name}
         chain netboot.ipxe
       '';
     }) pxeNodeNames;
