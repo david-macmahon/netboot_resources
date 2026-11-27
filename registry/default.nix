@@ -269,14 +269,19 @@ let
     # directives belong in the dnsmasq config directory.
     dhcp-hostsfile=/etc/netboot-registry/dhcp-hosts
     ${lib.optionalString (cluster ? nixos) ''
-      # iPXE two-stage boot: iPXE clients identify themselves with option
-      # 175 (the iPXE extensions option -- sent by iPXE, never by a BIOS
-      # PXE ROM), so the SECOND DHCP request of the boot (the one iPXE
-      # itself makes) gets the registry's MAC-keyed dispatch script over
-      # HTTP, while every BIOS ROM keeps the site's default pxelinux.0
-      # bootfile and the hand-era menus. This makes ipxe.lkrn's
-      # DHCP-autoboot do the right thing: autoboot re-asks DHCP, and this
-      # answer IS the next stage.
+      # iPXE client identification: iPXE sends option 175 (its extensions
+      # option -- a BIOS PXE ROM never does), so dhcp-match can tag it for
+      # the SECOND DHCP request of a boot (the one iPXE itself makes).
+      # NOTE (first-boot lesson from blh3): this dhcp-boot rule does NOT
+      # currently take effect for the lkrn autoboot path, because the
+      # house config (/etc/dnsmasq.conf) sets tag "pxe" on EVERY
+      # PXEClient vendorclass -- iPXE included -- and its
+      # "dhcp-boot=tag:pxe,pxe/pxelinux.0" shadows this one. The
+      # unattended boot therefore does NOT rely on autoboot: the nixos
+      # menu's cmdline does "dhcp && chain <dispatch URL>" itself. These
+      # rules stay correct and dormant -- they become load-bearing for
+      # undionly/UEFI boot stages, and the house rule will need its
+      # documented "!gpxe"-style negation ("tag:!ipxe") when that happens.
       dhcp-match=set:ipxe,175
       dhcp-boot=net:ipxe,${cluster.nixos.httpBaseUrl}/dispatch.ipxe
     ''}
@@ -336,7 +341,13 @@ let
       LABEL nixos
           MENU LABEL NixOS (netboot)
           KERNEL ipxe.lkrn
-          APPEND chain ${cluster.nixos.httpBaseUrl}/dispatch.ipxe
+          # The lkrn cmdline IS an iPXE script (one command line). DHCP
+          # must happen BEFORE any fetch, and && sequences on success:
+          # first-boot lesson from blh3 -- a bare "chain http://..." fails
+          # with Network unreachable (no IP yet), and the failure path is
+          # a silent exit to the BIOS (looks like a hang, then falls
+          # through to the next boot device).
+          APPEND dhcp && chain ${cluster.nixos.httpBaseUrl}/dispatch.ipxe
     '';
     # extended as further boot profiles are integrated
   };

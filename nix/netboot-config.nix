@@ -131,6 +131,39 @@ in
   # up "nixos" by the time getty started.)
   networking.hostName = lib.mkForce "";
 
+  # Persist the cmdline hostname to /etc/hostname BEFORE networking.
+  # systemd applies systemd.hostname= at boot, but with no static
+  # /etc/hostname NetworkManager invents "dhcp-<lease-ip>" for nodes
+  # whose leases carry no hostname option -- and a netboot node can
+  # lease on MORE than one subnet (blh3's second NIC found a foreign
+  # DHCP server). Writing the file early pins the cmdline name as the
+  # static one; NM then preserves it. Generic mode (no systemd.hostname=)
+  # writes nothing, leaving NM's dhcp-<ip> self-naming in place -- the
+  # parked design for unregistered triage nodes.
+  systemd.services.nixos-hostname = {
+    description = "Persist the cmdline hostname to /etc/hostname";
+    wantedBy = [ "sysinit.target" ];
+    before = [ "network-pre.target" "shutdown.target" ];
+    conflicts = [ "shutdown.target" ];
+    unitConfig.DefaultDependencies = "no";
+    serviceConfig.Type = "oneshot";
+    serviceConfig.RemainAfterExit = true;
+    script = ''
+      host=""
+      for p in $(cat /proc/cmdline); do
+        case "$p" in
+          systemd.hostname=*) host=''${p#systemd.hostname=} ;;
+        esac
+      done
+      if [ -n "$host" ]; then
+        echo "$host" > /etc/hostname
+        echo "nixos-hostname: hostname=$host (from cmdline)"
+      else
+        echo "nixos-hostname: no systemd.hostname= on cmdline; generic mode"
+      fi
+    '';
+  };
+
   # sshd serves the baked keys until the overlay swaps in the persistent
   # ones. mkIf (not an empty list) so generic builds keep the module
   # default keys (rsa + ed25519, generated at boot).
