@@ -176,15 +176,29 @@ in
     # NFS server hangs accesses (the POSIX behavior users expect from
     # /home) without failing anything at boot. nfsvers=3 matches the
     # house exports (no NFSv4 on the server); nointr is obsolete on
-    # modern kernels.
+    # modern kernels. The mount unit's start-rate limit is disabled:
+    # an access fired during the boot's network-dark window fails
+    # INSTANTLY (mount.nfs ENETUNREACH), and systemd's default 5-per-
+    # 10s start limit then kills the automount permanently
+    # (blh3's first healthy-network boot lost /home exactly this way
+    # while /persistent, mounted a minute later, worked). With no
+    # limit, every access retries until the network is real. The
+    # automount is also ordered after network-online.target so it is
+    # not even armed during early boot (best effort -- the target can
+    # complete on a failed wait-online).
     (lib.mapAttrsToList (where: what: {
       what = "${cluster.nfsServer}:${what}";
       where = where;
       type = "nfs";
-      options = "nfsvers=3,rw,noatime,hard";
+      options = "nfsvers=3,rw,noatime,hard,nofail";
       wantedBy = [ ];
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
+      # Disable the start-rate limit (see the note below the
+      # automounts for why: failed attempts during the boot's
+      # network-dark window must not permanently kill the mount).
+      startLimitIntervalSec = 0;
+      startLimitBurst = 0;
     }) sharedMounts)
     # LOCAL DISKS: generic per-label mount units (cluster.diskLabels),
     # shared by the whole fleet and activated PER NODE via the anchor's
@@ -218,9 +232,22 @@ in
         where = where;
         # No idle timeout: once a session has its home open, an unmount
         # (and the re-mount churn under it) is worse than staying up.
+        # Ordered after network-online so the automount is not armed
+        # during the network-dark boot window (best effort; the mount
+        # unit's disabled start-rate limit is the real self-healing).
         wantedBy = [ "remote-fs.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
       }) sharedMounts)
   ];
+
+  # Start-rate limit is disabled on the shared NFS mount units (see
+  # the mount definitions above): an access fired during the boot's
+  # network-dark window fails INSTANTLY (mount.nfs ENETUNREACH), and
+  # systemd's default 5-per-10s start limit then kills the automount
+  # permanently (blh3 lost /home exactly this way while /persistent,
+  # mounted a minute later, worked). With no limit, every access
+  # retries until the network is genuinely up.
 
   # Baked-in ssh host keys: copied from the stable external source into
   # the store by the build (stable across image rebuilds) and installed
@@ -655,44 +682,19 @@ in
   };
 
   # Remote syslog: forward everything to the log server (UDP, the
-  # house convention), with local logging kept. Uses rsyslog-light --
-  # the full rsyslog package builds optional output modules (mysql,
-  # pg, mongodb, snmp, kafka, ...) whose closures are enormous: the
-  # mongodb module alone pulls libmongoc and a gcc-wrapper (~267MB)
-  # into the boot image. rsyslog-light disables every optional
-  # transport; the core modules this config needs (imuxsock, omfile,
-  # omfwd) remain. The stock services.rsyslogd module hardcodes the
-  # full package, so this is a hand-rolled unit with the same config
-  # shape (the stock module's header + defaultConf, plus the forward).
-  systemd.services.syslog = lib.mkIf (logServer != null) {
-    description = "Syslog Daemon (forwarding to the cluster log server)";
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      ExecStart =
-        let
-          syslogConf = pkgs.writeText "syslog.conf" ''
-            $ModLoad imuxsock
-            $SystemLogSocketName /run/systemd/journal/syslog
-            $WorkDirectory /var/spool/rsyslog
-
-            # Local logging (the house convention: log locally AND
-            # forward).
-            local1.*                     -/var/log/dhcpd
-            mail.*                       -/var/log/mail
-            .*=warning;.*=err            -/var/log/warn
-            .*.crit                       /var/log/warn
-            *.*;mail.none;local1.none    -/var/log/messages
-
-            # Everything to the log server.
-            *.* @${logServer}
-          '';
-        in
-        "${pkgs.rsyslog-light}/sbin/rsyslogd -f ${syslogConf} -n";
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/spool/rsyslog";
-      # Prevent syslogd output looping back through journald.
-      StandardOutput = "null";
-      Restart = "on-failure";
-    };
+  # house convention), keeping local logging. Uses the stock
+  # services.rsyslogd module (full rsyslog). NOTE: the rsyslog-light
+  # package is NOT viable -- it segfaults at startup on real hardware
+  # (glibc 'Relink ... for IFUNC symbol modf' warning followed by
+  # SIGSEGV in ld.so; reproduced on blh3 and in QEMU), so the full
+  # package's optional-module closure (mongoc -> gcc, ~267MB on disk)
+  # stays for now; it dies naturally under the Phase-3 store design.
+  services.rsyslogd = lib.mkIf (logServer != null) {
+    enable = true;
+    extraConfig = ''
+      # Everything to the log server.
+      *.* @${logServer}
+    '';
   };
 
   # mdadm software RAID: stage-1 assembly + the mdadm monitor, so the
