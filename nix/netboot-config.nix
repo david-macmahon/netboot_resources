@@ -90,6 +90,12 @@ let
   # site-specific; the SITE is in ch.nix.
   ldap = if cluster == null then null else cluster.ldap or null;
   adminUsers = if cluster == null then [ ] else cluster.adminUsers or [ ];
+  # LDAP users (by uid name) that need sudo: rendered as members of
+  # the local wheel group entry. A local group listing an LDAP name
+  # works without a local user -- NSS resolves the member list by
+  # name at initgroups/sudo time (the same mechanism the house's
+  # rootfs /etc/group sudo entry used for LDAP members).
+  sudoUsers = if cluster == null then [ ] else cluster.sudoUsers or [ ];
   # mountpoint -> server-side export path (under cluster.nfsServer)
   sharedMounts =
     if cluster == null then { } else cluster.sharedMounts or { };
@@ -334,6 +340,12 @@ in
         isNormalUser = true;
         home = "/home/${u.name}";
         createHome = false;
+        # Sudo via NixOS's native wheel group (the house's gid-27
+        # "sudo" group is NOT carried forward: its only consumers were
+        # the stock Ubuntu sudoers rule and one sudoers.d exception
+        # whose binary lives in node-local /usr/local; wheel gives the
+        # identical password-required UX).
+        extraGroups = [ "wheel" ];
       };
     }) adminUsers))
   ];
@@ -516,6 +528,10 @@ in
 
   # (Local admin accounts are merged into users.users up above, with
   # root's authorized keys.)
+
+  # LDAP users needing sudo ride the local wheel group entry (see the
+  # sudoUsers note in the let block).
+  users.groups.wheel.members = lib.mkIf (sudoUsers != [ ]) sudoUsers;
 
   # Time: NTP source is the head node (the fleet has no outside NTP
   # route); mkForce replaces the module's default public pool -- a
