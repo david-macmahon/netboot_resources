@@ -655,14 +655,44 @@ in
   };
 
   # Remote syslog: forward everything to the log server (UDP, the
-  # house convention). rsyslogd's defaultConfig keeps local logging,
-  # so nodes log locally AND forward.
-  services.rsyslogd = lib.mkIf (logServer != null) {
-    enable = true;
-    extraConfig = ''
-      # Everything to the log server.
-      *.* @${logServer}
-    '';
+  # house convention), with local logging kept. Uses rsyslog-light --
+  # the full rsyslog package builds optional output modules (mysql,
+  # pg, mongodb, snmp, kafka, ...) whose closures are enormous: the
+  # mongodb module alone pulls libmongoc and a gcc-wrapper (~267MB)
+  # into the boot image. rsyslog-light disables every optional
+  # transport; the core modules this config needs (imuxsock, omfile,
+  # omfwd) remain. The stock services.rsyslogd module hardcodes the
+  # full package, so this is a hand-rolled unit with the same config
+  # shape (the stock module's header + defaultConf, plus the forward).
+  systemd.services.syslog = lib.mkIf (logServer != null) {
+    description = "Syslog Daemon (forwarding to the cluster log server)";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart =
+        let
+          syslogConf = pkgs.writeText "syslog.conf" ''
+            $ModLoad imuxsock
+            $SystemLogSocketName /run/systemd/journal/syslog
+            $WorkDirectory /var/spool/rsyslog
+
+            # Local logging (the house convention: log locally AND
+            # forward).
+            local1.*                     -/var/log/dhcpd
+            mail.*                       -/var/log/mail
+            .*=warning;.*=err            -/var/log/warn
+            .*.crit                       /var/log/warn
+            *.*;mail.none;local1.none    -/var/log/messages
+
+            # Everything to the log server.
+            *.* @${logServer}
+          '';
+        in
+        "${pkgs.rsyslog-light}/sbin/rsyslogd -f ${syslogConf} -n";
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/spool/rsyslog";
+      # Prevent syslogd output looping back through journald.
+      StandardOutput = "null";
+      Restart = "on-failure";
+    };
   };
 
   # mdadm software RAID: stage-1 assembly + the mdadm monitor, so the
