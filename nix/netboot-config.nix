@@ -353,13 +353,19 @@ in
     }) adminUsers))
     # The installer's default "nixos" account (empty password, wheel
     # membership) is an installer convenience, not a fleet identity:
-    # lock it and strip it from wheel. Root's password handling is a
-    # separate, deliberate decision (emergency console access).
+    # lock it and strip it from wheel. Root's console password is
+    # locked too (davidm: all fixes can be made on the head node --
+    # the netboot model makes node-local rescue unnecessary; admin
+    # access is ssh-key-only via the two-key overlay).
     (lib.mkIf (cluster != null) {
       nixos = {
         hashedPassword = lib.mkForce "!";
         initialHashedPassword = lib.mkForce "!";
         extraGroups = lib.mkForce [ ];
+      };
+      root = {
+        hashedPassword = lib.mkForce "!";
+        initialHashedPassword = lib.mkForce "!";
       };
     })
   ];
