@@ -524,7 +524,51 @@ in
     daemon.enable = true;
     server = ldap.server;
     base = ldap.base;
+    # NSS/PAM resilience at boot (learned from blh3's first
+    # cluster-image boot): nslcd starts before the network, and while
+    # the LDAP server is unreachable each client request blocks for
+    # the reconnect retry window (default reconnect_retrytime 10s).
+    # Early-boot callers -- PID1's initgroups for every User= service,
+    # logind's session setup, PAM logins -- each pay that cost per
+    # lookup; logind blew its 90s notify deadline and hit its restart
+    # limit, and NM sat 600s in nslcd's request queue behind a getty
+    # autologin PAM storm. Two defenses:
+    #   (a) fail fast: shrink the per-request reconnect window to ~1s
+    #       (the lookups then return "no server" quickly and callers
+    #       proceed; once the network is up the queries succeed);
+    #   (b) start nslcd only after the network is genuinely usable.
+    # Also note: initgroups CONSULTS the ldap module for EVERY user
+    # (even files-hits like root) because the nsswitch group line is
+    # "files ldap [success=merge]" -- there is no files short-circuit
+    # for group-membership queries, so these knobs matter for all
+    # services with a User=.
+    daemon.extraConfig = ''
+      # Fail fast when the LDAP server is unreachable (netboot boot
+      # window); the defaults (sleep 1s, retry up to 10s per request)
+      # made every early NSS/PAM lookup block for ~11 seconds.
+      reconnect_sleeptime 1
+      reconnect_retrytime 1
+    '';
   };
+
+  systemd.services.nslcd = lib.mkIf (ldap != null) {
+    # See the nss-resilience comment above: serve lookups only once
+    # the network is usable. Before nslcd runs, NSS ldap lookups fail
+    # INSTANTLY (nothing listens on /run/nslcd/socket), which is the
+    # desired early-boot behavior; a running nslcd is what makes them
+    # block.
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+  };
+
+  # The installer profile auto-logins the default "nixos" user on
+  # every console getty. On a fleet node that is wrong twice over:
+  # with LDAP in the PAM stack each autologin fires pam_ldap at boot
+  # (when the network is down) -- on blh3 that request storm was what
+  # saturated nslcd and starved logind/NM of responses -- and it
+  # hands out a wheel-member session with no password to anyone with
+  # BMC console access.
+  services.getty.autologinUser = lib.mkIf (cluster != null) (lib.mkForce null);
 
   # (Local admin accounts are merged into users.users up above, with
   # root's authorized keys.)
