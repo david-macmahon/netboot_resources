@@ -125,7 +125,10 @@ in
   disabledModules = [ "services/hardware/udev.nix" ];
 
   # NFS client support for the persistent-storage mount.
-  boot.supportedFilesystems = [ "nfs" ];
+  boot.supportedFilesystems = lib.mkMerge [
+    { nfs = true; }
+    (lib.mkIf (cluster != null) { zfs = lib.mkForce false; })
+  ];
 
   # One static mount unit for the whole fleet: the node's anchor path is
   # filled in by %H (hostname at unit-load time). The mount is TRIGGERED,
@@ -348,6 +351,17 @@ in
         extraGroups = [ "wheel" ];
       };
     }) adminUsers))
+    # The installer's default "nixos" account (empty password, wheel
+    # membership) is an installer convenience, not a fleet identity:
+    # lock it and strip it from wheel. Root's password handling is a
+    # separate, deliberate decision (emergency console access).
+    (lib.mkIf (cluster != null) {
+      nixos = {
+        hashedPassword = lib.mkForce "!";
+        initialHashedPassword = lib.mkForce "!";
+        extraGroups = lib.mkForce [ ];
+      };
+    })
   ];
 
   # ssh host key overlay: when /persistent actually mounts (the mount
@@ -569,6 +583,36 @@ in
   # hands out a wheel-member session with no password to anyone with
   # BMC console access.
   services.getty.autologinUser = lib.mkIf (cluster != null) (lib.mkForce null);
+
+  # ------------------------------------------------------------------
+  # SITE IMAGE HYGIENE: the netboot base is NixOS INSTALLER media, and
+  # it ships installer/desktop conveniences a fleet node must not
+  # have. Everything here is gated on cluster != null -- generic
+  # (installer-like) builds keep stock behavior.
+  # ------------------------------------------------------------------
+
+  # No WiFi or cellular management: the NetworkManager module enables
+  # wpa_supplicant (DBus-controlled) and ModemManager by default, for
+  # wireless/WWAN adapters that rack servers do not have.
+  # wpa_supplicant additionally cost an early-boot NSS lookup (PID1's
+  # initgroups for its service user) during the boot-wedge incident.
+  networking.wireless.enable =
+    lib.mkIf (cluster != null) (lib.mkForce false);
+  networking.modemmanager.enable =
+    lib.mkIf (cluster != null) (lib.mkForce false);
+
+  # The installer media sets wheelNeedsPassword=false with an
+  # image-media override, rendering wheel sudo as NOPASSWD -- the
+  # opposite of the house policy (the old gid-27 sudo group carried
+  # Ubuntu's stock password-required rule). Force the standard
+  # behavior back: sudo from wheel prompts for a password.
+  security.sudo.wheelNeedsPassword =
+    lib.mkIf (cluster != null) (lib.mkForce true);
+
+  # The installer ships the full documentation set (NixOS manual, all
+  # man pages) via image-media overrides; the fleet image does not
+  # carry docs.
+  documentation.enable = lib.mkIf (cluster != null) (lib.mkForce false);
 
   # (Local admin accounts are merged into users.users up above, with
   # root's authorized keys.)
