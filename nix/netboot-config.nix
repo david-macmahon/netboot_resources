@@ -620,6 +620,18 @@ in
   # carry docs.
   documentation.enable = lib.mkIf (cluster != null) (lib.mkForce false);
 
+  # The installer bundles the whole nixpkgs SOURCE TREE as a channel
+  # (~485MB in the image) so the installer media can reinstall itself,
+  # and ships the installer toolset (nixos-install / nixos-rebuild /
+  # nixos-generate-config / nixos-option, dragging large python/perl
+  # environments). Fleet nodes are redeployed as images and fixed
+  # server-side via their anchors; they neither rebuild nor
+  # reconfigure themselves. nix itself stays (nix-shell remains
+  # available).
+  system.installer.channel.enable =
+    lib.mkIf (cluster != null) (lib.mkForce false);
+  system.disableInstallerTools = lib.mkIf (cluster != null) true;
+
   # (Local admin accounts are merged into users.users up above, with
   # root's authorized keys.)
 
